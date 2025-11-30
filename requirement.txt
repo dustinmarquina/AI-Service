@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pydantic
+regex
+numpy
+scikit-learn
+torch
+sentence-transformers
+pymongo
+pika
+python-dotenv
