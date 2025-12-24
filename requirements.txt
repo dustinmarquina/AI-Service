@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pydantic
+numpy
+sentence-transformers==2.2.2
+pymongo
+pika
+python-dotenv
+requests
+ollama

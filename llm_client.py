@@ -5,7 +5,8 @@ import os
 # Cloud Ollama configuration
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
 OLLAMA_CLOUD_HOST = "https://ollama.com"
-OLLAMA_LOCAL_HOST = "http://127.0.0.1:11434"
+OLLAMA_LOCAL_HOST = os.getenv("OLLAMA_LOCAL_HOST", "http://localhost:11434")
+# OLLAMA_LOCAL_FORWARD_HOST = "https://7m4plr3m-11434.asse.devtunnels.ms"
 
 # -----------------------------------------------------
 # 1. Low-level Ollama call

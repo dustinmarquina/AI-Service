@@ -5,8 +5,8 @@ import logging
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from tx_sandbox import modelize, clean_example_text
-from transaction_classifying import addCategoryExample, initUserCategory, categorizeItem, addCustomCategory
+
+from transaction_classifying import addCategoryExample, addCategoryExampleByCatgoryId, initUserCategory, categorizeItem, addCustomCategory, modelize, clean_example_text
 from predictor import predict_next_month
 from rabbitmq_service import get_rabbitmq_service
 from message_handler import handle_message
@@ -27,9 +27,6 @@ async def lifespan(app: FastAPI):
         rabbitmq.connect()
         rabbitmq.set_message_handler(handle_message)
         
-        # Example: Dynamically add more queues programmatically
-        # rabbitmq.add_consumer_queue("analytics.ai.queue", "analytics.ai.request")
-        # rabbitmq.add_consumer_queue("report.ai.queue", "report.ai.request")
         
         rabbitmq.start_consuming_background()
         logger.info("✅ RabbitMQ consumer started in background")
@@ -81,12 +78,18 @@ def create_item(item_id: int, q: Union[str, None] = None):
     initUserCategory(userId=str(item_id))
 
 @app.post("/item/categorize/{user_id}")
-def categorize(user_id: int, item: str, q: Union[str, None] = None):
+def categorize(user_id: str, item: str, q: Union[str, None] = None):
     return categorizeItem(userId=str(user_id), item=item)
 
 @app.post("/item/add/{user_id}")
-def addExample(user_id: int, categoryId: str, item: str, q: Union[str, None] = None):
-    return addCategoryExample(userId=str(user_id), categoryId=categoryId, example=item)
+def addExample(user_id: str, categoryId: str, item: str, q: Union[str, None] = None):
+    return addCategoryExampleByCatgoryId(userId=user_id, categoryId=categoryId, example=item)
+
+@app.post("/category-reset/{user_id}")
+def resetCentroids(user_id: str):
+    from transaction_classifying import resetCentroids
+    resetCentroids(userId=user_id)
+    return {"status": "centroids reset"}
 
 @app.delete("/items/{item_id}")
 def delete_item(item_id: int):
@@ -97,6 +100,10 @@ def delete_item(item_id: int):
 @app.get("/extract_amount/")
 def extract_amount_endpoint(text: str, userId: str):
     return modelize(text, userId=userId)
+
+@app.get("/get_item/")
+def get_item(item: str):
+    return clean_example_text(item)
 
 @app.post("/generate_seed_examples/")
 def generate_seed_examples(category_name: str):

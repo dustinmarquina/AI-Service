@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.pdb
 
 # Build artifacts
 .Python
@@ -12,26 +13,28 @@ __pycache__/
 dist/
 build/
 
-# Virtual env
+# Virtual environments
 .env
 .venv/
+.venv-1/
 venv/
+env/
+ENV/
 
-# Git
-.git/
-.gitignore
+# Environment variables
+.env.local
+.env.*.local
 
-# Docker files
-.dockerignore
-Dockerfile*
-docker-compose*
-
-# Documentation
-README.md
-*.md
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
 # OS clutter
 .DS_Store
+Thumbs.db
 
 # Logs
 *.log
@@ -39,9 +42,9 @@ logs/
 .pytest_cache
 .coverage
 htmlcov/
+.mypy_cache/
 
-# --- CRITICAL FOR AI PROJECTS ---
-# Local models, embeddings, LLaMA, checkpoints
+# AI/ML specific
 models/
 model/
 weights/
@@ -61,9 +64,9 @@ datasets/
 *.pkl
 
 # HuggingFace cache
-~/.cache/huggingface/
 huggingface/
 transformers_cache/
+.cache/
 
 # Vector DB / FAISS indexes
 *.index
@@ -76,4 +79,14 @@ vector_store/
 # Ollama models & cache
 .ollama/
 ollama/
-~/.ollama/
+
+# Docker
+docker-compose.override.yml
+
+# Test files
+test_*.py.backup
+*.test.py
+
+# Temporary files
+*.tmp
+*.temp

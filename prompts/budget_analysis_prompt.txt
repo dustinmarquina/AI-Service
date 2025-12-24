@@ -10,6 +10,8 @@ DỮ LIỆU CHI TIÊU CỦA NGƯỜI DÙNG THÁNG VỪA RỒI
 - Chỉ dùng dữ liệu từ DỮ LIỆU CHI TIÊU CỦA NGƯỜI DÙNG THÁNG VỪA RỒI.
 - Thay đổi người nghe thành bạn thay vì người dùng.
 - Đơn vị tiền tệ sử dụng là VNĐ.
+- TẤT CẢ các con số tiền trong dữ liệu đều là VNĐ NGUYÊN (ví dụ: 772606 = bảy trăm bảy mươi hai nghìn sáu trăm lẻ sáu VNĐ).
+- TUYỆT ĐỐI KHÔNG quy đổi sang nghìn, triệu, hay tỷ.
 - Không tự tạo số liệu hoặc danh mục không tồn tại.
 - Không nhắc đến bản thân là mô hình AI.
 - Viết bằng tiếng Việt, văn phong ngắn gọn, thực tế.

@@ -1,18 +1,10 @@
 from encodings.aliases import aliases
 from pymongo import MongoClient
 import re
-import unicodedata
+from tx_sandbox import clean_example_text, extract_amount, remove_accents, parse_direction, normalize_category
+from typing import Dict
 
-def normalize_category(name: str) -> str:
-    name = name.lower().strip()
-    name = name.replace("&", "and")
-    name = re.sub(r"\s+", " ", name)
-    name = re.sub(r"\s*([,.;:])\s*", r"\1 ", name)
-    return name.strip()
 
-def remove_accents(input_str: str) -> str:
-    nfkd_form = unicodedata.normalize('NFKD', input_str)
-    return ''.join([c for c in nfkd_form if not unicodedata.combining(c)])    
 
 try:
     from .model_loader import load_model
@@ -52,6 +44,28 @@ examples = [
     # ("đầu tư ssi", "Investments"),
     # ("rút tiền atm", "Cash"),
 ]
+
+def modelize(raw: str, userId: str = None) -> Dict[str, object]:
+    amount    = extract_amount(raw)
+    direction = parse_direction(raw)
+
+    # # A) Rules-first
+    # hit = classify_by_rules(raw)
+    # if hit:
+    #     cid, cname = hit
+    #     return {
+    #         "raw": raw, "amount": amount, "currency": "VND", "direction": direction,
+    #         "categoryId": cid, "category_name": cname,
+    #         "confidence": 0.99, "decision_source": "RULE"
+    #     }
+ 
+    # B) Embeddings (optional)
+    # elif use_embeddings:
+    cid = categorizeItem(userId, clean_example_text(raw))
+    return {
+        "raw": raw, "amount": amount, "direction": direction,
+        "categoryId": cid,
+    }
 
 # Build class centroids (you can recompute whenever you add examples)
 X = model.encode([t for t,_ in examples], normalize_embeddings=True)
@@ -138,8 +152,9 @@ def categorizeItem(userId: str, item: str):
     v = model.encode([item], normalize_embeddings=True)[0]
     centroid_vec = [e["centroid"] for e in user_categories]
     sims = centroid_vec @ v
+    print(sims)
     i = int(np.argmax(sims)); score = float(sims[i])
-    return (user_categories[i]["categoryId"] if score>=0.55 else "Other/Review")
+    return (user_categories[i]["categoryId"] if score>=0.8 else "Other/Review")
     
 
 # Add a new example sentence to a user's category
@@ -148,6 +163,9 @@ def addCategoryExample(userId: str, categoryName: str, example: str):
     accentfree_name = remove_accents(categoryName)
     normalized_name = normalize_category(accentfree_name)
     categoryId = normalized_name.replace(" ", "_")
+    accentfree_example = remove_accents(example)
+    clean_example = clean_example_text(accentfree_example)
+    print ("Cleaned example:", clean_example)
     all_user_cats = category_collection.find({"userId": userId})
     for cat in all_user_cats:
         if any(e["text"] == example for e in cat["exampleList"]):
@@ -184,8 +202,8 @@ def addCategoryExample(userId: str, categoryName: str, example: str):
     result = category_collection.update_one(
         {"userId": userId, "categoryId": categoryId},
         {"$push": {"exampleList": {
-            "text": example,
-            "embedding": model.encode([remove_accents(example)], normalize_embeddings=True)[0].tolist()
+            "text": clean_example,
+            "embedding": model.encode([remove_accents(clean_example)], normalize_embeddings=True)[0].tolist()
         }}}
     )
     updated_cat = category_collection.find_one({"userId": userId, "categoryId": categoryId})
@@ -233,12 +251,14 @@ def addCategoryExampleByCatgoryId(userId: str, categoryId: str, example: str):
                 {"$set": {"centroid": new_centroid}}
             )
     if not category_collection.find_one({"userId": userId, "categoryId": categoryId}):
-        addCustomCategory(userId=userId, categoryId=categoryId, categoryName=categoryId)            
+        addCustomCategory(userId=userId, categoryId=categoryId, categoryName=categoryId)
+    accentfree_example = remove_accents(example)
+    clean_example = clean_example_text(accentfree_example)            
     result = category_collection.update_one(
         {"userId": userId, "categoryId": categoryId},
         {"$push": {"exampleList": {
-            "text": example,
-            "embedding": model.encode([remove_accents(example)], normalize_embeddings=True)[0].tolist()
+            "text": clean_example,
+            "embedding": model.encode([clean_example], normalize_embeddings=True)[0].tolist()
         }}}
     )
     updated_cat = category_collection.find_one({"userId": userId, "categoryId": categoryId})
@@ -252,6 +272,29 @@ def addCategoryExampleByCatgoryId(userId: str, categoryId: str, example: str):
     if result.modified_count == 0:
         return "No matching category found."
     return "Example added."
+
+def resetCentroids(userId: str, categoryId = None):
+    query = {"userId": userId}
+    if categoryId:
+        query["categoryId"] = categoryId
+    user_cats = category_collection.find(query)
+    for cat in user_cats:
+        ex_list = cat.get("exampleList", [])
+        if len(ex_list) > 0:
+            new_centroid = np.mean(
+                [e["embedding"] for e in ex_list],
+                axis=0
+            ).tolist()
+        else:
+            new_centroid = model.encode(
+                [remove_accents(cat["categoryName"])],
+                normalize_embeddings=True
+            )[0].tolist()
+        category_collection.update_one(
+            {"userId": userId, "categoryId": cat["categoryId"]},
+            {"$set": {"centroid": new_centroid}}
+        )
+    return "Centroids reset."
 
 def deleteCategoryExample(userId: str, categoryId: str, example: str):
     result = category_collection.update_one(

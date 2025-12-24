@@ -147,7 +147,7 @@ def handle_transaction_event(message: Dict[str, Any]) -> Optional[Dict[str, Any]
         elif event_type == "UPDATED":
             # Re-classify if description changed
             logger.info(f"🔄 Transaction UPDATED: {description} (ID: {transaction_id})")
-            addCategoryExample(userId=user_id, categoryId=category_id, example=description)
+            addCategoryExampleByCatgoryId(userId=user_id, categoryId=category_id, example=description)
             return {
                 "status": "success",
                 "eventType": event_type,
@@ -271,7 +271,7 @@ def handle_message(message: Dict[str, Any], queue_name: str = None, routing_key:
                     "message": "Missing 'text', 'userId', or 'categoryId'"
                 }
             
-            result = addCategoryExample(userId=user_id, categoryId=category_id, example=text)
+            result = addCategoryExampleByCatgoryId(userId=user_id, categoryId=category_id, example=text)
             
             return {
                 "status": "success",

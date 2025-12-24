@@ -18,8 +18,8 @@ What to edit first:
 
 import re
 from dataclasses import dataclass
-from typing import Optional, Tuple, List, Dict
-from transaction_classifying import classify_desc, categorizeItem
+from typing import Optional, Tuple, List
+import unicodedata  
 
 # -----------------------------
 # 0) Category catalog (YOUR IDs)
@@ -62,6 +62,17 @@ CLEAN_PATTERNS += [
     r"^[+-]",
     r"\b\d+\b",
 ]
+
+def normalize_category(name: str) -> str:
+    name = name.lower().strip()
+    name = name.replace("&", "and")
+    name = re.sub(r"\s+", " ", name)
+    name = re.sub(r"\s*([,.;:])\s*", r"\1 ", name)
+    return name.strip()
+
+def remove_accents(input_str: str) -> str:
+    nfkd_form = unicodedata.normalize('NFKD', input_str)
+    return ''.join([c for c in nfkd_form if not unicodedata.combining(c)])    
 
 def clean_example_text(text: str) -> str:
     """Optional: clean text before embedding (amounts removal, etc.)"""
@@ -162,38 +173,9 @@ MARGIN    = 0.05  # gap to 2nd best
 
 
 
-def classify_by_embeddings(text: str, userId: str) -> Tuple[int, str, float]:
-    """
-    TODO (enable later):
-    - Load SentenceTransformer (e5-small)
-    - Build/Load centroids from seed_examples()
-    - Encode 'query: {text}' and compare with cosine
-    Return (categoryId, category_name, score) or (Other, "Other/Review", score)
-    """
-    return categorizeItem(userId, text)
 
 
-def modelize(raw: str, userId: str = None) -> Dict[str, object]:
-    amount    = extract_amount(raw)
-    direction = parse_direction(raw)
 
-    # # A) Rules-first
-    # hit = classify_by_rules(raw)
-    # if hit:
-    #     cid, cname = hit
-    #     return {
-    #         "raw": raw, "amount": amount, "currency": "VND", "direction": direction,
-    #         "categoryId": cid, "category_name": cname,
-    #         "confidence": 0.99, "decision_source": "RULE"
-    #     }
- 
-    # B) Embeddings (optional)
-    # elif use_embeddings:
-    cid = classify_by_embeddings(clean_example_text(raw), userId=userId)
-    return {
-        "raw": raw, "amount": amount, "direction": direction,
-        "categoryId": cid,
-    }
 
     # C) Fallback
     # return {
@@ -222,5 +204,5 @@ if __name__ == "__main__":
         # "di voi ban 70k"
         "2 phần cơm gà 50k",
     ]
-    for s in samples:
-        print(s, "→", modelize(s, use_embeddings=True))
+    # for s in samples:
+    #     print(s, "→", modelize(s, use_embeddings=True))
