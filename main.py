@@ -1,224 +1,172 @@
-from typing import Union
-from contextlib import asynccontextmanager
+"""
+AI Service - FastAPI Application
+
+A comprehensive FastAPI service for transaction categorization, financial predictions,
+AI chat, and RabbitMQ message processing.
+
+Author: AI Service Team
+Version: 2.0.0
+"""
+
 import logging
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-
-from transaction_classifying import addCategoryExample, addCategoryExampleByCatgoryId, initUserCategory, categorizeItem, addCustomCategory, modelize, clean_example_text
-from predictor import predict_next_month
 from rabbitmq_service import get_rabbitmq_service
 from message_handler import handle_message
+from routes import (
+    categories_router,
+    analysis_router,
+    chat_router,
+    rabbitmq_router,
+)
+from agents.orchestrator.graph.main_graph import build_main_graph
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# ============================================
+# Logging Configuration
+# ============================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 
+# ============================================
+# Application Lifecycle Management
+# ============================================
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage RabbitMQ connection lifecycle"""
+    """
+    Manage application lifecycle events.
+    
+    Handles:
+    - RabbitMQ connection initialization
+    - Background consumer startup
+    - Graceful shutdown and cleanup
+    """
     rabbitmq = get_rabbitmq_service()
     
     try:
         # Startup
-        logger.info("🚀 Starting FastAPI application...")
+        # Initialize the orchestrator graph used by chat and routing
+        app.state.main_graph = build_main_graph()
+        logger.info("✅ Main graph initialized")
+        logger.info("🚀 Starting AI Service...")
         rabbitmq.connect()
         rabbitmq.set_message_handler(handle_message)
-        
-        
         rabbitmq.start_consuming_background()
-        logger.info("✅ RabbitMQ consumer started in background")
+        logger.info("✅ RabbitMQ consumer started successfully")
         
         yield
         
     except Exception as e:
         logger.error(f"❌ Failed to start RabbitMQ: {e}")
-        logger.info("⚠️ Continuing without RabbitMQ...")
+        logger.info("⚠️  Continuing without RabbitMQ...")
         yield
         
     finally:
         # Shutdown
-        logger.info("🛑 Shutting down FastAPI application...")
+        logger.info("🛑 Shutting down AI Service...")
         try:
             rabbitmq.stop_consuming()
             rabbitmq.disconnect()
-        except:
-            pass
+            logger.info("✅ Cleanup completed")
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
 
 
-app = FastAPI(lifespan=lifespan)
+# ============================================
+# FastAPI Application
+# ============================================
 
-# Enable CORS
+app = FastAPI(
+    title="AI Service API",
+    description="AI-powered financial analysis, transaction categorization, and chat service",
+    version="2.0.0",
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
+
+
+# ============================================
+# Middleware Configuration
+# ============================================
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins
+    allow_origins=["*"],  # TODO: In production, replace with specific origins
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-@app.get("/")
-def read_root():
-    return {"Hello": "World"}
+# ============================================
+# Exception Handlers
+# ============================================
 
-
-@app.get("/items/{item_id}")
-def read_item(item_id: int, q: Union[str, None] = None):
-    return {"item_id": item_id, "q": q}
-
-@app.post("/items")
-def add_custom_category(userId: str, categoryName: str):
-    return addCustomCategory(userId=userId, categoryName=categoryName)
-
-@app.post("/items/{item_id}")
-def create_item(item_id: int, q: Union[str, None] = None):
-    initUserCategory(userId=str(item_id))
-
-@app.post("/item/categorize/{user_id}")
-def categorize(user_id: str, item: str, q: Union[str, None] = None):
-    return categorizeItem(userId=str(user_id), item=item)
-
-@app.post("/item/add/{user_id}")
-def addExample(user_id: str, categoryId: str, item: str, q: Union[str, None] = None):
-    return addCategoryExampleByCatgoryId(userId=user_id, categoryId=categoryId, example=item)
-
-@app.post("/category-reset/{user_id}")
-def resetCentroids(user_id: str):
-    from transaction_classifying import resetCentroids
-    resetCentroids(userId=user_id)
-    return {"status": "centroids reset"}
-
-@app.delete("/items/{item_id}")
-def delete_item(item_id: int):
-    from transaction_classifying import deleteCategoryByUserId
-    result = deleteCategoryByUserId(userId=str(item_id))
-    return {"item_id": item_id, "result": result}
-
-@app.get("/extract_amount/")
-def extract_amount_endpoint(text: str, userId: str):
-    return modelize(text, userId=userId)
-
-@app.get("/get_item/")
-def get_item(item: str):
-    return clean_example_text(item)
-
-@app.post("/generate_seed_examples/")
-def generate_seed_examples(category_name: str):
-    from llm_client import build_strict_seed_prompt, call_local_llm
-    prompt = build_strict_seed_prompt(category_name)
-    response = call_local_llm(prompt, temperature=0.3)
-    return {"category_name": category_name, "examples": response}
-
-@app.api_route("/predict_next_month", methods=["GET", "POST", "OPTIONS"])
-@app.api_route("/predict_next_month/", methods=["GET", "POST", "OPTIONS"])
-async def predict_next_month_endpoint(report: dict = None):
-    """
-    Endpoint for LLM prediction streaming
-    Use POST with JSON body for full report data
-    Use GET for testing (will use mock data)
-    """
-    if report is None:
-        # Mock data for GET requests
-        report = {
-            "cashFlow": {"totalExpense": 1425, "transactionCount": 38},
-            "availableBalance": 75,
-            "expenseStructure": {
-                "categories": [
-                    {"categoryName": "badminton", "amount": 600, "percentage": 42.11, "transactionCount": 15},
-                    {"categoryName": "Food & Dining", "amount": 475, "percentage": 33.33, "transactionCount": 12}
-                ]
-            },
-            "periodComparison": {
-                "comparison": {"expenseDelta": 50, "expenseChangePercent": 3.6}
-            },
-            "budgetProgress": {
-                "totalBudget": 1500,
-                "totalSpent": 1425,
-                "overallStatus": "ON_TRACK"
-            }
-        }
-    return predict_next_month(report)
-
-# spending analysis endpoint
-@app.post("/analysis/spending")
-async def analyze_spending(report: dict):
-    from predictor import analyze_spending_report
-    return analyze_spending_report(report)
-
-@app.post("/generate/budget-tips")
-async def budget_tips(report: dict):
-    from predictor import generate_budget_tips
-    return generate_budget_tips(report)
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    """Global exception handler for unhandled errors"""
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "status": "error",
+            "message": "An internal server error occurred",
+            "detail": str(exc) if app.debug else None,
+        },
+    )
 
 
 # ============================================
-# RabbitMQ Management Endpoints
+# Include Routers
 # ============================================
 
-@app.get("/rabbitmq/status")
-def rabbitmq_status():
-    """Check RabbitMQ connection status"""
-    rabbitmq = get_rabbitmq_service()
+app.include_router(categories_router)
+app.include_router(analysis_router)
+app.include_router(chat_router)
+app.include_router(rabbitmq_router)
+
+
+# ============================================
+# Health Check & Root Endpoints
+# ============================================
+
+@app.get("/", tags=["Health"])
+def root():
+    """Root endpoint - API status check"""
+    return {
+        "service": "AI Service",
+        "status": "running",
+        "version": "2.0.0",
+        "message": "Welcome to AI Service API",
+        "docs": "/docs",
+    }
+
+
+@app.get("/health", tags=["Health"])
+def health_check():
+    """
+    Health check endpoint for monitoring and load balancers.
     
-    is_connected = rabbitmq.connection and rabbitmq.connection.is_open
-    is_consuming = rabbitmq._consuming
+    Returns service status and component health.
+    """
+    rabbitmq = get_rabbitmq_service()
+    rabbitmq_healthy = rabbitmq.connection and rabbitmq.connection.is_open
     
     return {
-        "connected": is_connected,
-        "consuming": is_consuming,
-        "exchange": rabbitmq.exchange,
-        "consumer_queue": rabbitmq.consumer_queue,
-        "producer_queue": rabbitmq.producer_queue,
-        "host": f"{rabbitmq.host}:{rabbitmq.port}"
+        "status": "healthy",
+        "service": "ai-service",
+        "components": {
+            "api": "ok",
+            "rabbitmq": "ok" if rabbitmq_healthy else "degraded",
+        },
     }
-
-
-@app.post("/rabbitmq/publish")
-def publish_to_rabbitmq(message: dict, routing_key: str = None):
-    """
-    Manually publish a message to RabbitMQ producer queue
-    
-    Example request body:
-    {
-        "status": "success",
-        "action": "classify",
-        "userId": "user123",
-        "data": {...}
-    }
-    """
-    rabbitmq = get_rabbitmq_service()
-    
-    success = rabbitmq.publish_message(message, routing_key=routing_key)
-    
-    if success:
-        return {
-            "status": "success",
-            "message": "Message published successfully",
-            "queue": rabbitmq.producer_queue
-        }
-    else:
-        raise HTTPException(status_code=500, detail="Failed to publish message")
-
-
-@app.post("/rabbitmq/add-queue")
-def add_consumer_queue(queue_name: str, routing_key: str = None):
-    """
-    Dynamically add a new consumer queue
-    
-    Example: POST /rabbitmq/add-queue?queue_name=analytics.ai.queue&routing_key=analytics.ai.request
-    """
-    rabbitmq = get_rabbitmq_service()
-    
-    try:
-        rabbitmq.add_consumer_queue(queue_name, routing_key)
-        return {
-            "status": "success",
-            "message": f"Queue '{queue_name}' added successfully",
-            "queue": queue_name,
-            "routing_key": routing_key or queue_name
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to add queue: {str(e)}")

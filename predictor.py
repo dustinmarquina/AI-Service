@@ -17,21 +17,21 @@ def prepare_prediction_context(report):
             )
 
         summary = f"""
-Tổng chi tháng hiện tại: {cash['totalExpense']}
-Số giao dịch: {cash['transactionCount']}
-Số dư còn lại: {report['availableBalance']}
-Danh mục chi tiêu:
-{chr(10).join(cat_lines)}
+            Tổng chi tháng hiện tại: {cash['totalExpense']}
+            Số giao dịch: {cash['transactionCount']}
+            Số dư còn lại: {report['availableBalance']}
+            Danh mục chi tiêu:
+            {chr(10).join(cat_lines)}
 
-So sánh tháng trước:
-- Tăng/giảm chi tiêu: {period['comparison']['expenseDelta']}
-- Tăng/giảm %: {period['comparison']['expenseChangePercent']}
+            So sánh tháng trước:
+            - Tăng/giảm chi tiêu: {period['comparison']['expenseDelta']}
+            - Tăng/giảm %: {period['comparison']['expenseChanPercent']}
 
-Tiến độ ngân sách:
-Tổng ngân sách: {budget['totalBudget']}
-Đã tiêu: {budget['totalSpent']}
-Trạng thái chung: {budget['overallStatus']}
-"""
+            Tiến độ ngân sách:
+            Tổng ngân sách: {budget['totalBudget']}
+            Đã tiêu: {budget['totalSpent']}
+            Trạng thái chung: {budget['overallStatus']}
+            """
         return summary.strip()
     except Exception as e:
         return f"(Error preparing data: {str(e)})"
@@ -67,29 +67,6 @@ def predict_next_month(report_data):
     from fastapi.responses import StreamingResponse
     return StreamingResponse(generate(), media_type="text/event-stream")
 
-# {
-#     "cashFlow": {
-#         "totalIncome": 15000000,
-#         "totalExpense": 9200000,
-#         "netIncome": 5800000,
-#         "transactionCount": 47
-#     },
-#     "availableBalance": 8650000,
-#     "monthComparison": {
-#         "previousMonthIncome": 14000000,
-#         "previousMonthExpense": 8600000,
-#         "previousMonthNet": 5400000,
-#         "incomeChange": 1000000,
-#         "expenseChange": 600000,
-#         "netChange": 400000,
-#         "incomeChangePercent": 7.14,
-#         "expenseChangePercent": 6.98,
-#         "netChangePercent": 7.40
-#     },
-#     "year": 2025,
-#     "month": 11,
-#     "generatedAt": "2025-11-23T16:06:32.302725"
-# }
 def prepare_analysis_context(report):
     try:
         cash = report["cashFlow"]
@@ -158,114 +135,6 @@ def analyze_spending_report(report):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
-
-{
-  "cashFlow": {
-    "totalIncome": 15000000,
-    "totalExpense": 9200000,
-    "netIncome": 5800000,
-    "transactionCount": 47
-  },
-
-  "availableBalance": 8650000,
-
-  "expenseStructure": {
-    "totalExpense": 9200000,
-    "categories": [
-      {
-        "categoryId": "f23be549-98a3-417a-b6e8-17f5ae4b22c3",
-        "categoryName": "Badminton",
-        "icon": "",
-        "amount": 3500000,
-        "percentage": 38.04,
-        "transactionCount": 3
-      },
-      {
-        "categoryId": "85e38348-bcac-45fe-9cc5-282788a533af",
-        "categoryName": "Food & Dining",
-        "icon": "dab-a",
-        "amount": 2800000,
-        "percentage": 30.43,
-        "transactionCount": 7
-      },
-      {
-        "categoryId": "e64fd287-f8ac-4516-9726-069be3ed294d",
-        "categoryName": "Recreation",
-        "icon": "",
-        "amount": 2400000,
-        "percentage": 26.09,
-        "transactionCount": 2
-      },
-      {
-        "categoryId": "e2b5a0e8-3e35-4a92-afe4-ffe7a111c25b",
-        "categoryName": "Other",
-        "icon": "",
-        "amount": 500000,
-        "percentage": 5.43,
-        "transactionCount": 1
-      }
-    ],
-    "periodStart": "2025-11-01T00:00:00",
-    "periodEnd": "2025-11-30T23:59:59"
-  },
-
-  "budgetProgress": {
-    "year": 2025,
-    "month": 11,
-    "totalBudget": 10000000,
-    "totalSpent": 9200000,
-    "totalRemaining": 800000,
-    "overallProgress": 92,
-    "overallStatus": "WARNING",
-
-    "categoryBudgets": [
-      {
-        "categoryId": "f23be549-98a3-417a-b6e8-17f5ae4b22c3",
-        "categoryName": "Badminton",
-        "icon": "",
-        "limitAmount": 3000000,
-        "spentAmount": 3500000,
-        "remaining": -500000,
-        "progressPercentage": 117,
-        "status": "OVER_BUDGET",
-        "transactionCount": 3
-      },
-      {
-        "categoryId": "85e38348-bcac-45fe-9cc5-282788a533af",
-        "categoryName": "Food & Dining",
-        "icon": "dab-a",
-        "limitAmount": 3000000,
-        "spentAmount": 2800000,
-        "remaining": 200000,
-        "progressPercentage": 93,
-        "status": "WARNING",
-        "transactionCount": 7
-      },
-      {
-        "categoryId": "e64fd287-f8ac-4516-9726-069be3ed294d",
-        "categoryName": "Recreation",
-        "icon": "",
-        "limitAmount": 2000000,
-        "spentAmount": 2400000,
-        "remaining": -400000,
-        "progressPercentage": 120,
-        "status": "OVER_BUDGET",
-        "transactionCount": 2
-      },
-      {
-        "categoryId": "e2b5a0e8-3e35-4a92-afe4-ffe7a111c25b",
-        "categoryName": "Other",
-        "icon": "",
-        "limitAmount": 500000,
-        "spentAmount": 500000,
-        "remaining": 0,
-        "progressPercentage": 100,
-        "status": "ON_TRACK",
-        "transactionCount": 1
-      }
-    ]
-  }
-}
 
 def prepare_budget_context(report):
     try:

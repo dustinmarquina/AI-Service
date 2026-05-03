@@ -149,12 +149,14 @@ def categorizeItem(userId: str, item: str):
     user_categories = list(category_collection.find({"userId": userId}))
     if not user_categories:
         return "User categories not initialized."
-    v = model.encode([item], normalize_embeddings=True)[0]
+    remove_accents_item = remove_accents(item)
+    clean_example_text_item = clean_example_text(remove_accents_item)
+    v = model.encode([clean_example_text_item], normalize_embeddings=True)[0]
     centroid_vec = [e["centroid"] for e in user_categories]
     sims = centroid_vec @ v
     print(sims)
     i = int(np.argmax(sims)); score = float(sims[i])
-    return (user_categories[i]["categoryId"] if score>=0.8 else "Other/Review")
+    return (user_categories[i]["categoryId"] if score>=0.85 else "Other/Review")
     
 
 # Add a new example sentence to a user's category
@@ -220,12 +222,14 @@ def addCategoryExample(userId: str, categoryName: str, example: str):
 
 def addCategoryExampleByCatgoryId(userId: str, categoryId: str, example: str):
     all_user_cats = category_collection.find({"userId": userId})
+    accentfree_example = remove_accents(example)
+    clean_example = clean_example_text(accentfree_example)     
     for cat in all_user_cats:
-        if any(e["text"] == example for e in cat["exampleList"]):
+        if any(e["text"] == clean_example for e in cat["exampleList"]):
             # Remove the example
             category_collection.update_one(
                 {"userId": userId, "categoryId": cat["categoryId"]},
-                {"$pull": {"exampleList": {"text": example}}}
+                {"$pull": {"exampleList": {"text": clean_example}}}
             )
 
             # Fetch updated example list once
@@ -249,11 +253,7 @@ def addCategoryExampleByCatgoryId(userId: str, categoryId: str, example: str):
             category_collection.update_one(
                 {"userId": userId, "categoryId": cat["categoryId"]},
                 {"$set": {"centroid": new_centroid}}
-            )
-    if not category_collection.find_one({"userId": userId, "categoryId": categoryId}):
-        addCustomCategory(userId=userId, categoryId=categoryId, categoryName=categoryId)
-    accentfree_example = remove_accents(example)
-    clean_example = clean_example_text(accentfree_example)            
+            )       
     result = category_collection.update_one(
         {"userId": userId, "categoryId": categoryId},
         {"$push": {"exampleList": {

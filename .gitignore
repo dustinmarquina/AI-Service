@@ -80,6 +80,9 @@ vector_store/
 .ollama/
 ollama/
 
+# LangGraph API runtime
+.langgraph_api/
+
 # Docker
 docker-compose.override.yml
 

@@ -24,24 +24,25 @@ class RabbitMQService:
         # Connection settings
         self.host = os.getenv("RABBITMQ_HOST", "localhost")
         self.port = int(os.getenv("RABBITMQ_PORT", "5672"))
-        self.username = os.getenv("RABBITMQ_USER", "guest")
+        self.username = os.getenv("RABBITMQ_USERNAME") or os.getenv("RABBITMQ_USER", "guest")
         self.password = os.getenv("RABBITMQ_PASSWORD", "guest")
-        self.vhost = os.getenv("RABBITMQ_VHOST", "/")
+        self.vhost = os.getenv("RABBITMQ_VIRTUAL_HOST") or os.getenv("RABBITMQ_VHOST", "/")
         
         # Exchanges
-        self.exchange = os.getenv("RABBITMQ_EXCHANGE", "category.ai.exchange")
-        self.transaction_exchange = os.getenv("RABBITMQ_TRANSACTION_EXCHANGE", "transaction.ai.exchange")
+        self.transaction_exchange = os.getenv("RABBITMQ_TRANSACTION_EXCHANGE") or os.getenv("RABBITMQ_EXCHANGE", "transaction.exchange")
+        self.ai_exchange = os.getenv("RABBITMQ_AI_EXCHANGE", "ai.exchange")
+        self.exchange = self.transaction_exchange
         
         # Store all exchanges
-        self.exchanges = [self.exchange, self.transaction_exchange]
+        self.exchanges = [self.transaction_exchange, self.ai_exchange]
         
         # Consumer queues (receive from Spring Boot)
-        self.consumer_queue = os.getenv("RABBITMQ_CONSUMER_QUEUE", "python.classify.request")
-        self.consumer_routing_key = os.getenv("RABBITMQ_CONSUMER_ROUTING_KEY", "transaction.classify.request")
+        self.consumer_queue = os.getenv("RABBITMQ_CONSUMER_QUEUE", "category.to.ai.queue")
+        self.consumer_routing_key = os.getenv("RABBITMQ_CONSUMER_ROUTING_KEY", "category.to.ai")
         
         # Additional consumer queues (comma-separated in .env)
-        additional_queues = os.getenv("RABBITMQ_ADDITIONAL_QUEUES", "")
-        additional_keys = os.getenv("RABBITMQ_ADDITIONAL_ROUTING_KEYS", "")
+        additional_queues = os.getenv("RABBITMQ_ADDITIONAL_QUEUES", "transaction.to.ai.queue")
+        additional_keys = os.getenv("RABBITMQ_ADDITIONAL_ROUTING_KEYS", "transaction.to.ai")
         
         self.consumer_queues = [self.consumer_queue]
         self.consumer_routing_keys = [self.consumer_routing_key]
@@ -52,8 +53,8 @@ class RabbitMQService:
             self.consumer_routing_keys.extend([k.strip() for k in additional_keys.split(",") if k.strip()])
         
         # Producer queue (send to Spring Boot)
-        self.producer_queue = os.getenv("RABBITMQ_PRODUCER_QUEUE", "python.classify.response")
-        self.producer_routing_key = os.getenv("RABBITMQ_PRODUCER_ROUTING_KEY", "transaction.classify.response")
+        self.producer_queue = os.getenv("RABBITMQ_PRODUCER_QUEUE", "ai.category.update.queue")
+        self.producer_routing_key = os.getenv("RABBITMQ_PRODUCER_ROUTING_KEY", "ai.category.update")
         
         # Connection objects
         self.connection: Optional[pika.BlockingConnection] = None
@@ -91,38 +92,26 @@ class RabbitMQService:
                 logger.info(f"📡 Declared exchange: {exchange}")
             
             # Declare and bind consumer queues
-            # category.ai.queue -> category.ai.exchange
-            self.channel.queue_declare(queue=self.consumer_queue, durable=True)
-            self.channel.queue_bind(
-                exchange=self.exchange,
-                queue=self.consumer_queue,
-                routing_key=self.consumer_routing_key
-            )
-            logger.info(f"📥 Consumer Queue 1: {self.consumer_queue} -> {self.exchange}")
+            for i, queue in enumerate(self.consumer_queues):
+                routing_key = self.consumer_routing_keys[i] if i < len(self.consumer_routing_keys) else queue
+
+                self.channel.queue_declare(queue=queue, durable=True)
+                self.channel.queue_bind(
+                    exchange=self.transaction_exchange,
+                    queue=queue,
+                    routing_key=routing_key
+                )
+                logger.info(f"📥 Consumer Queue {i+1}: {queue} -> {self.transaction_exchange} (routing: {routing_key})")
             
-            # transaction.ai.request.queue -> transaction.ai.exchange
-            if len(self.consumer_queues) > 1:
-                for i in range(1, len(self.consumer_queues)):
-                    queue = self.consumer_queues[i]
-                    routing_key = self.consumer_routing_keys[i] if i < len(self.consumer_routing_keys) else queue
-                    
-                    self.channel.queue_declare(queue=queue, durable=True)
-                    self.channel.queue_bind(
-                        exchange=self.transaction_exchange,
-                        queue=queue,
-                        routing_key=routing_key
-                    )
-                    logger.info(f"📥 Consumer Queue {i+1}: {queue} -> {self.transaction_exchange} (routing: {routing_key})")
-            
-            # Declare producer queue (transaction.ai.reply.queue -> transaction.ai.exchange)
+            # Declare producer queue (ai.category.update.queue -> ai.exchange)
             self.channel.queue_declare(
                 queue=self.producer_queue,
                 durable=True
             )
             
-            # Bind producer queue to transaction exchange
+            # Bind producer queue to AI exchange
             self.channel.queue_bind(
-                exchange=self.transaction_exchange,
+                exchange=self.ai_exchange,
                 queue=self.producer_queue,
                 routing_key=self.producer_routing_key
             )
@@ -153,7 +142,7 @@ class RabbitMQService:
         Args:
             message: Dictionary to send as JSON
             routing_key: Optional routing key (defaults to producer_routing_key)
-            exchange: Optional exchange (defaults to transaction_exchange)
+            exchange: Optional exchange (defaults to ai_exchange)
         
         Returns:
             True if published successfully
@@ -166,7 +155,7 @@ class RabbitMQService:
             message_body = json.dumps(message, ensure_ascii=False)
             
             self.channel.basic_publish(
-                exchange=exchange or self.transaction_exchange,
+                exchange=exchange or self.ai_exchange,
                 routing_key=routing_key or self.producer_routing_key,
                 body=message_body,
                 properties=pika.BasicProperties(
@@ -175,7 +164,7 @@ class RabbitMQService:
                 )
             )
             
-            logger.info(f"📤 Published message to {exchange or self.transaction_exchange} -> {routing_key or self.producer_routing_key}")
+            logger.info(f"📤 Published message to {exchange or self.ai_exchange} -> {routing_key or self.producer_routing_key}")
             logger.debug(f"Message: {message}")
             return True
             
@@ -199,15 +188,16 @@ class RabbitMQService:
             message = json.loads(body.decode('utf-8'))
             queue_name = method.routing_key
             logger.info(f"📥 Received message from {queue_name}: {message}")
+            logger.debug(f"📋 Message details - Content-Type: {properties.content_type}, Routing Key: {method.routing_key}")
             
             # Process message with handler
             if self.message_handler:
                 # Pass queue info to handler
                 response = self.message_handler(message, queue_name=queue_name, routing_key=method.routing_key)
                 
-                print(f"queue_name: {queue_name}, routing_key: {method.routing_key}")
+                logger.debug(f"queue_name: {queue_name}, routing_key: {method.routing_key}")
                 # Publish response if handler returned something
-                if response and queue_name == "transaction.ai.request":
+                if response:
                     self.publish_message(response)
                 else:
                     logger.info("ℹ️ No response to publish for this queue")
@@ -298,7 +288,7 @@ class RabbitMQService:
             try:
                 self.channel.queue_declare(queue=queue_name, durable=True)
                 self.channel.queue_bind(
-                    exchange=self.exchange,
+                    exchange=self.transaction_exchange,
                     queue=queue_name,
                     routing_key=routing_key
                 )

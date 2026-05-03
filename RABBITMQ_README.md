@@ -7,11 +7,11 @@ This FastAPI service integrates with RabbitMQ to communicate with a Spring Boot 
 ```
 Spring Boot Microservice
          ↓ (publishes)
-[python.classify.request] Queue ← FastAPI Consumer
+[category.to.ai.queue] Queue ← FastAPI Consumer
          ↓ (processes)
 FastAPI Handler (classify, add_example, etc.)
          ↓ (publishes)
-[python.classify.response] Queue → Spring Boot Consumer
+[ai.category.update.queue] Queue → Spring Boot Consumer
 ```
 
 ## Setup
@@ -45,8 +45,11 @@ Edit `.env`:
 ```env
 RABBITMQ_HOST=localhost
 RABBITMQ_PORT=5672
-RABBITMQ_USER=guest
+RABBITMQ_USERNAME=guest
 RABBITMQ_PASSWORD=guest
+RABBITMQ_VIRTUAL_HOST=/
+RABBITMQ_TRANSACTION_EXCHANGE=transaction.exchange
+RABBITMQ_AI_EXCHANGE=ai.exchange
 ```
 
 ### 3. Install Dependencies
@@ -65,14 +68,14 @@ uvicorn main:app --reload
 
 ### Consumer Queue (Receives from Spring Boot)
 
-- **Queue Name**: `category.ai.queue`
-- **Routing Key**: `category.ai.request`
+- **Queue Name**: `category.to.ai.queue`
+- **Routing Key**: `category.to.ai`
 - **Purpose**: Receives classification requests from Spring Boot
 
 ### Producer Queue (Sends to Spring Boot)
 
-- **Queue Name**: `python.classify.response`
-- **Routing Key**: `transaction.classify.response`
+- **Queue Name**: `ai.category.update.queue`
+- **Routing Key**: `ai.category.update`
 - **Purpose**: Sends classification results back to Spring Boot
 
 ## Message Format
@@ -140,15 +143,16 @@ Visit: http://localhost:15672 (guest/guest)
 
 ### 2. Verify Queues Created
 
-- `category.ai.queue`
-- `python.classify.response`
-- Exchange: `transaction_exchange`
+- `category.to.ai.queue`
+- `transaction.to.ai.queue`
+- `ai.category.update.queue`
+- Exchanges: `transaction.exchange`, `ai.exchange`
 
 ### 3. Test Message Flow
 
 **Send test message via RabbitMQ Management UI:**
 
-- Go to Queues → `category.ai.queue`
+- Go to Queues → `category.to.ai.queue`
 - Publish message:
 
 ```json
@@ -159,7 +163,7 @@ Visit: http://localhost:15672 (guest/guest)
 }
 ```
 
-**Check response in `python.classify.response` queue**
+**Check response in `ai.category.update.queue` queue**
 
 ### 4. Monitor Logs
 
@@ -167,7 +171,7 @@ Visit: http://localhost:15672 (guest/guest)
 # FastAPI logs will show:
 # 📥 Received message: {...}
 # ✅ Message processed successfully
-# 📤 Published message to transaction.classify.response
+# 📤 Published message to ai.category.update
 ```
 
 ## Spring Boot Integration
@@ -189,11 +193,12 @@ spring.rabbitmq.port=5672
 spring.rabbitmq.username=guest
 spring.rabbitmq.password=guest
 
-rabbitmq.exchange.name=transaction_exchange
-rabbitmq.queue.request=category.ai.queue
-rabbitmq.queue.response=python.classify.response
-rabbitmq.routing-key.request=category.ai.request
-rabbitmq.routing-key.response=transaction.classify.response
+rabbitmq.exchange.transaction=transaction.exchange
+rabbitmq.exchange.ai=ai.exchange
+rabbitmq.queue.request=category.to.ai.queue
+rabbitmq.queue.response=ai.category.update.queue
+rabbitmq.routing-key.request=category.to.ai
+rabbitmq.routing-key.response=ai.category.update
 ```
 
 ### Publisher (Spring Boot sends to Python)
@@ -212,8 +217,8 @@ public class TransactionPublisher {
         );
 
         rabbitTemplate.convertAndSend(
-            "transaction_exchange",
-            "category.ai.request",
+          "transaction.exchange",
+          "category.to.ai",
             message
         );
     }
@@ -266,6 +271,7 @@ public class TransactionConsumer {
 | RABBITMQ_USER           | guest                    | RabbitMQ username     |
 | RABBITMQ_PASSWORD       | guest                    | RabbitMQ password     |
 | RABBITMQ_VHOST          | /                        | RabbitMQ virtual host |
-| RABBITMQ_EXCHANGE       | transaction_exchange     | Exchange name         |
-| RABBITMQ_CONSUMER_QUEUE | category.ai.queue        | Consumer queue        |
-| RABBITMQ_PRODUCER_QUEUE | python.classify.response | Producer queue        |
+| RABBITMQ_TRANSACTION_EXCHANGE | transaction.exchange | Transaction exchange  |
+| RABBITMQ_AI_EXCHANGE    | ai.exchange              | AI exchange           |
+| RABBITMQ_CONSUMER_QUEUE | category.to.ai.queue     | Consumer queue        |
+| RABBITMQ_PRODUCER_QUEUE | ai.category.update.queue | Producer queue        |

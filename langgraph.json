@@ -1,0 +1,9 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "finance": "graph.finance_graph:build_finance_graph",
+    "transaction": "agents.orchestrator.graph:build_transaction_graph",
+    "main": "agents.orchestrator.graph:build_main_graph"
+  },
+  "env": ".env"
+}

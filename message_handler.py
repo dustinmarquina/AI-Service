@@ -4,7 +4,7 @@ Handles requests from Spring Boot microservice
 """
 import logging
 from typing import Dict, Any, Optional
-from transaction_classifying import categorizeItem, addCategoryExample, addCustomCategory, initUserCategory, addCategoryExampleByCatgoryId
+from transaction_classifying import categorizeItem, addCustomCategory, initUserCategory, addCategoryExampleByCatgoryId
 from tx_sandbox import clean_example_text
 
 logger = logging.getLogger(__name__)
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 def handle_category_event(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
-    Handle category events from category.ai.queue
+    Handle category events from category.to.ai.queue
     
     Expected message format:
     {
@@ -95,59 +95,92 @@ def handle_category_event(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 def handle_transaction_event(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
-    Handle transaction events from transaction.ai.queue
+    Handle transaction events from transaction.to.ai.queue
     
     Expected message format from Spring Boot:
     {
-        "eventType": "CREATED" | "UPDATED" | "DELETED",
+        "action": "CREATED" | "UPDATED" | "DELETED",
         "transactionId": "uuid",
         "userId": "uuid",
-        "walletId": "uuid",
         "categoryId": "uuid",
-        "description": "grab di truong",
-        "amount": 50000.0,
-        "timestamp": [2025, 11, 25, 13, 57, 43, 408812000]
+        "categoryName": "category test",
+        "amount": 15,
+        "type": "INCOME" | "EXPENSE",
+        "description": "optional description" (may be missing)
     }
     """
     try:
-        event_type = message.get("eventType")
+        # Log full message for debugging
+        logger.debug(f"📋 Full transaction message: {message}")
+        
+        # Map 'action' to 'eventType' (Spring Boot uses 'action', Python expects 'eventType')
+        event_type = message.get("action") or message.get("eventType")
         transaction_id = message.get("transactionId")
         user_id = message.get("userId")
-        wallet_id = message.get("walletId")
         category_id = message.get("categoryId")
-        description = message.get("description")
+        category_name = message.get("categoryName")
+        description = message.get("description") or category_name  # Fall back to category name if no description
         amount = message.get("amount")
+        tx_type = message.get("type")  # INCOME or EXPENSE
         
-        logger.info(f"💳 Transaction Event: {event_type} | User: {user_id} | Description: {description}")
+        logger.info(f"💳 Transaction Event: {event_type} | User: {user_id} | Category: {category_name} | Amount: {amount} ({tx_type})")
         
-        if event_type == "CREATED":
-            # Classify the transaction description
-            if not description or not user_id:
-                return {
-                    "status": "error",
-                    "eventType": event_type,
-                    "message": "Missing 'description' or 'userId' for classification"
-                }
-            
-            logger.info(f"🔍 Classifying transaction: {description}")
-            result = categorizeItem(userId=user_id, item=description)
-            
-            if category_id and result != category_id:
-                addCategoryExampleByCatgoryId(userId=user_id, categoryId=category_id, example=description)
-
+        # Check if required fields are missing
+        if not event_type:
+            logger.warning(f"⚠️  Missing 'action' or 'eventType' in message. Available keys: {list(message.keys())}")
             return {
-                "status": "success",
-                "transactionId": transaction_id,
-                "userId": user_id,
-                "walletId": wallet_id,
-                "categoryId": result,
-                "message": f"Transaction classified successfully"
+                "status": "error",
+                "message": "Missing 'action' field in transaction event"
             }
         
+        if not user_id:
+            logger.warning(f"⚠️  Missing 'userId' in message")
+            return {
+                "status": "error",
+                "message": "Missing 'userId' in transaction event"
+            }
+        
+        if event_type == "CREATED":
+            # Classify the transaction description if needed
+            if description and user_id:
+                logger.info(f"🔍 Classifying transaction: {description}")
+                result = categorizeItem(userId=user_id, item=description)
+                logger.info(f"✅ Classification result: {result}")
+                
+                # Add as example if category ID provided
+                if category_id:
+                    addCategoryExampleByCatgoryId(userId=user_id, categoryId=category_id, example=description)
+                    logger.info(f"📚 Added '{description}' as example for category {category_name}")
+
+                return {
+                    "status": "success",
+                    "transactionId": transaction_id,
+                    "userId": user_id,
+                    "categoryId": result or category_id,
+                    "categoryName": category_name,
+                    "amount": amount,
+                    "type": tx_type,
+                    "message": f"Transaction created and classified successfully"
+                }
+            else:
+                return {
+                    "status": "success",
+                    "transactionId": transaction_id,
+                    "userId": user_id,
+                    "categoryId": category_id,
+                    "categoryName": category_name,
+                    "amount": amount,
+                    "type": tx_type,
+                    "message": f"Transaction created (no classification needed)"
+                }
+        
         elif event_type == "UPDATED":
-            # Re-classify if description changed
+            # Re-classify or update example if description/category changed
             logger.info(f"🔄 Transaction UPDATED: {description} (ID: {transaction_id})")
-            addCategoryExampleByCatgoryId(userId=user_id, categoryId=category_id, example=description)
+            if description and user_id and category_id:
+                addCategoryExampleByCatgoryId(userId=user_id, categoryId=category_id, example=description)
+                logger.info(f"📚 Updated example for {description}")
+            
             return {
                 "status": "success",
                 "eventType": event_type,
@@ -171,9 +204,10 @@ def handle_transaction_event(message: Dict[str, Any]) -> Optional[Dict[str, Any]
             }
         
         else:
+            logger.warning(f"⚠️  Unknown action type: {event_type}")
             return {
                 "status": "error",
-                "message": f"Unknown eventType: {event_type}"
+                "message": f"Unknown action type: {event_type}"
             }
     
     except Exception as e:
@@ -216,15 +250,15 @@ def handle_message(message: Dict[str, Any], queue_name: str = None, routing_key:
             logger.info(f"📥 Message from queue: {queue_name}")
         
         # ====== CATEGORY QUEUE HANDLER ======
-        # category.ai.queue from category.ai.exchange (routing key might be category.ai.event or category.ai.queue)
-        if queue_name == "category.ai.queue" or (routing_key and "category.ai" in routing_key):
+        # category.to.ai.queue from transaction.exchange
+        if queue_name == "category.to.ai.queue" or (routing_key and routing_key.startswith("category.to.ai")):
             return handle_category_event(message)
         
         # ====== TRANSACTION QUEUE HANDLER ======
-        # transaction.ai.request.queue from transaction.ai.exchange
-        elif queue_name == "transaction.ai.request.queue" or (routing_key and routing_key == "transaction.ai.request"):
+        # transaction.to.ai.queue from transaction.exchange
+        elif queue_name == "transaction.to.ai.queue" or (routing_key and routing_key.startswith("transaction.to.ai")):
             return handle_transaction_event(message)
-        elif queue_name and ("transaction.ai" in queue_name or routing_key and "transaction.ai" in routing_key):
+        elif queue_name and ("transaction.to.ai" in queue_name or routing_key and "transaction.to.ai" in routing_key):
             return handle_transaction_event(message)
         
         # ====== LEGACY/DEFAULT ACTION-BASED HANDLER ======
