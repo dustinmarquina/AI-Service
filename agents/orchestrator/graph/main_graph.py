@@ -6,24 +6,28 @@ from typing import Any
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.chat_history import InMemoryChatMessageHistory
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langgraph.graph import END, START, StateGraph
+from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_mcp_adapters.client import MultiServerMCPClient
 import logging
 
+from .sql_agent import get_sql_agent
 from .state import State
-
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
 
 MAX_MEMORY_MESSAGES = 12
 SHORT_TERM_MEMORY: dict[str, InMemoryChatMessageHistory] = {}
 MCP_CLIENTS: list[Any] = []
 
 
+# ---------------------------------------------------------------------------
+# Helpers (unchanged)
+# ---------------------------------------------------------------------------
 
 def _get_session_id(state: State) -> str:
     return str(state.get("session_id") or state.get("user_id") or "default")
@@ -40,11 +44,9 @@ def _trim_memory(history: InMemoryChatMessageHistory) -> None:
         history.messages = history.messages[-MAX_MEMORY_MESSAGES:]
 
 
-
 def _build_mcp_server_config() -> dict[str, dict[str, Any]]:
     command = os.getenv("ORCHESTRATOR_MCP_COMMAND", "python")
     args = os.getenv("ORCHESTRATOR_MCP_ARGS", "-m agents.orchestrator.mcp_server")
-
     return {
         "orchestrator": {
             "transport": os.getenv("ORCHESTRATOR_MCP_TRANSPORT", "stdio"),
@@ -58,17 +60,43 @@ def _field_names_from_tool(tool: Any) -> set[str]:
     schema = getattr(tool, "args_schema", None)
     if schema is None:
         return set()
-
     fields = getattr(schema, "model_fields", None)
     if isinstance(fields, dict):
         return set(fields.keys())
-
     schema_fields = getattr(schema, "__fields__", None)
     if isinstance(schema_fields, dict):
         return set(schema_fields.keys())
-
     return set()
 
+
+# ---------------------------------------------------------------------------
+# Router: decides whether the user's message is a SQL/read query
+# ---------------------------------------------------------------------------
+
+_READ_PATTERNS = re.compile(
+    r"(bao nhiêu|tổng|chi tiêu|tháng|tuần|hôm nay|gần đây|nhiều nhất|ít nhất"
+    r"|thống kê|báo cáo|lịch sử|còn lại|budget|spent|how much|last month"
+    r"|summary|report|history|total|most|least)",
+    re.IGNORECASE,
+)
+
+
+def _is_read_query(state: State) -> str:
+    """Route to sql_agent for analytical questions, chat for everything else."""
+    messages = list(state.get("messages", []))
+    last_human = next(
+        (m for m in reversed(messages) if isinstance(m, HumanMessage)), None
+    )
+    if last_human and _READ_PATTERNS.search(str(last_human.content)):
+        logger.info("router: → sql_agent")
+        return "sql_agent"
+    logger.info("router: → chat")
+    return "chat"
+
+
+# ---------------------------------------------------------------------------
+# Main graph builder
+# ---------------------------------------------------------------------------
 
 async def build_main_graph():
     client = MultiServerMCPClient(_build_mcp_server_config())
@@ -114,14 +142,35 @@ Rules:
     llm_with_tools = llm.bind_tools(tools)
     chat_chain = prompt | llm_with_tools
 
+    # ---------------------------------------------------------------------------
+    # Nodes
+    # ---------------------------------------------------------------------------
+
     async def chat_node(state: State):
         session_id = _get_session_id(state)
         history = _get_memory(session_id)
         current_messages = list(state.get("messages", []))
         prompt_messages = history.messages + current_messages
-
         response = await chat_chain.ainvoke({"messages": prompt_messages})
         return {"messages": [response]}
+
+    async def sql_agent_node(state: State):
+        """Delegate to the SQL subgraph and surface its final answer."""
+        messages = list(state.get("messages", []))
+
+        sql_agent = get_sql_agent()
+        result = await sql_agent.ainvoke({"messages": messages})
+
+        # Extract the last non-tool AIMessage as the answer
+        final = next(
+            (
+                m for m in reversed(result["messages"])
+                if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None)
+            ),
+            AIMessage(content="Mình không tìm được kết quả phù hợp."),
+        )
+        logger.info("sql_agent_node: answer=%s", str(final.content)[:200])
+        return {"messages": [final]}
 
     def inject_runtime_context_node(state: State):
         current_messages = list(state.get("messages", []))
@@ -129,31 +178,20 @@ Rules:
             return {}
 
         last_ai = next(
-            (message for message in reversed(current_messages) if isinstance(message, AIMessage)),
+            (m for m in reversed(current_messages) if isinstance(m, AIMessage)),
             None,
         )
         if last_ai is None or not getattr(last_ai, "tool_calls", None):
             return {}
+
         runtime_token = str(state.get("token") or os.getenv("TRANSACTION_API_TOKEN", "")).strip()
         runtime_user_id = str(state.get("user_id") or os.getenv("TRANSACTION_USER_ID", "")).strip()
-        print(f"at main_graph runtime_user_id: {runtime_user_id}")
 
-        logger = logging.getLogger(__name__)
         redacted = (runtime_token[:8] + "...") if runtime_token else "(none)"
-        logger.info("inject_runtime_context: runtime_token=%s user_id=%s", redacted, runtime_user_id or "(none)")
-
-        # Log incoming tool_calls for debugging
-        try:
-            for idx, call in enumerate(last_ai.tool_calls):
-                name = call.get("name")
-                args = call.get("args") or {}
-                logger.info("inject_runtime_context: found tool_call[%d] name=%s args_keys=%s", idx, name, list(args.keys()))
-        except Exception:
-            logger.exception("inject_runtime_context: failed to log incoming tool_calls")
+        logger.info("inject_runtime_context: token=%s user_id=%s", redacted, runtime_user_id or "(none)")
 
         updated_tool_calls = []
         changed = False
-        injected_summary: list[dict[str, object]] = []
 
         for call in last_ai.tool_calls:
             call_copy = dict(call)
@@ -164,29 +202,20 @@ Rules:
             if runtime_token and not args.get("token"):
                 args["token"] = runtime_token
                 changed = True
-                injected_summary.append({"tool": tool_name, "injected": "token"})
-                logger.info("inject_runtime_context: injected 'token' into tool '%s'", tool_name)
+                logger.info("inject_runtime_context: injected 'token' into '%s'", tool_name)
 
             if runtime_user_id:
-                # Inject user id in the form expected by the tool schema.
                 if "userId" in fields:
                     if not args.get("userId"):
                         args["userId"] = runtime_user_id
                         changed = True
-                        injected_summary.append({"tool": tool_name, "injected": "userId"})
-                        logger.info("inject_runtime_context: injected 'userId' into tool '%s'", tool_name)
                 else:
-                    # default to snake_case 'user_id' which is commonly used by our tools
                     if not args.get("user_id"):
                         args["user_id"] = runtime_user_id
                         changed = True
-                        injected_summary.append({"tool": tool_name, "injected": "user_id"})
-                        logger.info("inject_runtime_context: injected 'user_id' into tool '%s'", tool_name)
 
-            # print(f"Processing tool call: {call_copy.get('name')} with args {args}")    
             call_copy["args"] = args
             updated_tool_calls.append(call_copy)
-            print(f"Updated tool call: {call_copy.get('name')} with args {args}")
 
         if not changed:
             return {}
@@ -200,8 +229,7 @@ Rules:
             invalid_tool_calls=getattr(last_ai, "invalid_tool_calls", []),
             name=last_ai.name,
         )
-
-        return {"messages": [updated_ai], "injected": injected_summary}
+        return {"messages": [updated_ai]}
 
     async def finalize_node(state: State):
         session_id = _get_session_id(state)
@@ -209,14 +237,12 @@ Rules:
         current_messages = list(state.get("messages", []))
 
         last_user_message = next(
-            (message for message in reversed(current_messages) if isinstance(message, HumanMessage)),
-            None,
+            (m for m in reversed(current_messages) if isinstance(m, HumanMessage)), None
         )
         last_ai_message = next(
             (
-                message
-                for message in reversed(current_messages)
-                if isinstance(message, AIMessage) and not getattr(message, "tool_calls", None)
+                m for m in reversed(current_messages)
+                if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None)
             ),
             None,
         )
@@ -234,24 +260,38 @@ Rules:
         _trim_memory(history)
         return {"response": fallback}
 
+    # ---------------------------------------------------------------------------
+    # Graph wiring
+    # ---------------------------------------------------------------------------
+
     graph = StateGraph(State)
 
     graph.add_node("chat", chat_node)
+    graph.add_node("sql_agent", sql_agent_node)
     graph.add_node("inject_runtime_context", inject_runtime_context_node)
     graph.add_node("tools", tool_node)
     graph.add_node("finalize", finalize_node)
 
-    graph.add_edge(START, "chat")
+    # START → router decides chat or sql_agent
+    graph.add_conditional_edges(
+        START,
+        _is_read_query,
+        {"chat": "chat", "sql_agent": "sql_agent"},
+    )
+
+    # chat → MCP tools or finalize
     graph.add_conditional_edges(
         "chat",
         tools_condition,
-        {
-            "tools": "inject_runtime_context",
-            "__end__": "finalize",
-        },
+        {"tools": "inject_runtime_context", "__end__": "finalize"},
     )
+
     graph.add_edge("inject_runtime_context", "tools")
     graph.add_edge("tools", "chat")
+
+    # sql_agent answer goes straight to finalize (memory + response)
+    graph.add_edge("sql_agent", "finalize")
+
     graph.add_edge("finalize", END)
 
     return graph.compile()

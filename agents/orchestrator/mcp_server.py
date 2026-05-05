@@ -208,13 +208,15 @@ async def create_transaction(
         "description": description,
         "type": "EXPENSE",
     }
-
+    logger.info("create_transaction: token=%s", _resolve_token(token))
     try:
         return await _api_call(
             "POST", TRANSACTION_API_URL,
             bearer=_resolve_token(token),
             payload=payload,
         )
+    #logging token
+    
     except APIError as exc:
         return _error_response(_auth_error_message(exc.status_code), status_code=exc.status_code, data=exc.data)
     except httpx.HTTPError as exc:
@@ -245,6 +247,7 @@ async def create_category(
         return _error_response("Category name is required.")
 
     resolved_user_id = _resolve_user_id(user_id)
+    logger.info("create_category: token=%s", _resolve_token(token))
     parsed_limit = _parse_amount(budget_limit)
     logger.info(
         "create_category: name=%s icon=%s budget_limit=%s→%s period=%s user_id=%s",

@@ -11,23 +11,23 @@ def test_connection():
         # get from .env file
         db = SQLDatabase.from_uri(os.getenv("POSTGRES_URI"))
         # try call API POST https://api-budget-tracker.manportfolio.id.vn/api/v1/categories with Authorization Bearer token from .env file
-        token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZjFlYjIwYi01NGU1LTQ5MTAtYjk3NC02MDE1MTE4NWU0OGYiLCJhY2NvdW50SWQiOiIzNTcwMmZiMy04NjYyLTRmYmMtOGZiNC00Mjc3YTUwNGM3YmEiLCJlbWFpbCI6ImRlbW8wMDFAZ21haWwuY29tIiwicm9sZXMiOiJST0xFX1VTRVIiLCJpYXQiOjE3Nzc4Nzk4MTIsImV4cCI6MTc3Nzk2NjIxMn0.mcAePJb40MFfMYKuXWk_jBSs2KhRWpeOkWguyfb90ME"
-        import httpx
-        response = httpx.post(
-            "https://api-budget-tracker.manportfolio.id.vn/api/v1/transactions",
-            json={
-                "userId": "af1eb20b-54e5-4910-b974-60151185e48f",
-                "amount": 1000,  # dummy amount for category creation
-                "description": "Category creation via chatbot",
-                "type": "EXPENSE",
-                "categoryName": "Test Category",
-                # "trấnc"
+        # token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZjFlYjIwYi01NGU1LTQ5MTAtYjk3NC02MDE1MTE4NWU0OGYiLCJhY2NvdW50SWQiOiIzNTcwMmZiMy04NjYyLTRmYmMtOGZiNC00Mjc3YTUwNGM3YmEiLCJlbWFpbCI6ImRlbW8wMDFAZ21haWwuY29tIiwicm9sZXMiOiJST0xFX1VTRVIiLCJpYXQiOjE3Nzc4Nzk4MTIsImV4cCI6MTc3Nzk2NjIxMn0.mcAePJb40MFfMYKuXWk_jBSs2KhRWpeOkWguyfb90ME"
+        # import httpx
+        # response = httpx.post(
+        #     "https://api-budget-tracker.manportfolio.id.vn/api/v1/transactions",
+        #     json={
+        #         "userId": "af1eb20b-54e5-4910-b974-60151185e48f",
+        #         "amount": 1000,  # dummy amount for category creation
+        #         "description": "Category creation via chatbot",
+        #         "type": "EXPENSE",
+        #         "categoryName": "Test Category",
+        #         # "trấnc"
                 
-            },
-            headers={
-                "Authorization": f"Bearer {token}"
-            }
-        )
+        #     },
+        #     headers={
+        #         "Authorization": f"Bearer {token}"
+        #     }
+        # )
 
         # response:
 #         {
@@ -42,7 +42,7 @@ def test_connection():
 #     "userId": "af1eb20b-54e5-4910-b974-60151185e48f",
 #     "transactionDate": "2026-03-11T12:59:11.865Z"
 # }
-        print("API Response:", response.json())
+        # print("API Response:", response.json())
 
 
         # import os
@@ -74,7 +74,8 @@ def test_connection():
 
         print(f"Dialect: {db.dialect}")
         print(f"Available tables: {db.get_usable_table_names()}")
-        print(f'Sample output: {db.run("SELECT * FROM users LIMIT 5;")}')
+        print(f'Table info: {db.get_table_info(["categories"])}')
+
 
         print("✅ Connected successfully")
 
