@@ -156,7 +156,7 @@ def categorizeItem(userId: str, item: str):
     sims = centroid_vec @ v
     print(sims)
     i = int(np.argmax(sims)); score = float(sims[i])
-    return (user_categories[i]["categoryId"] if score>=0.85 else "Other/Review")
+    return (user_categories[i]["categoryId"] if score>=0.7 else "Other/Review")
     
 
 # Add a new example sentence to a user's category

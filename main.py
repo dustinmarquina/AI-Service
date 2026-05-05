@@ -23,7 +23,7 @@ from routes import (
     chat_router,
     rabbitmq_router,
 )
-from agents.orchestrator.graph.main_graph import build_main_graph
+from agents.orchestrator.graph import build_main_graph
 
 # ============================================
 # Logging Configuration
@@ -55,7 +55,7 @@ async def lifespan(app: FastAPI):
     try:
         # Startup
         # Initialize the orchestrator graph used by chat and routing
-        app.state.main_graph = build_main_graph()
+        app.state.main_graph = await build_main_graph()
         logger.info("✅ Main graph initialized")
         logger.info("🚀 Starting AI Service...")
         rabbitmq.connect()

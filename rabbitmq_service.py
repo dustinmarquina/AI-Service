@@ -10,8 +10,8 @@ import pika
 from typing import Callable, Optional, Dict, Any
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+# Load environment variables and let .env override stale shell values.
+load_dotenv(override=True)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -51,6 +51,24 @@ class RabbitMQService:
             self.consumer_queues.extend([q.strip() for q in additional_queues.split(",") if q.strip()])
         if additional_keys:
             self.consumer_routing_keys.extend([k.strip() for k in additional_keys.split(",") if k.strip()])
+
+        # Deduplicate queue bindings while preserving order.
+        unique_queues = []
+        unique_routing_keys = []
+        seen_queues = set()
+        for index, queue in enumerate(self.consumer_queues):
+            routing_key = self.consumer_routing_keys[index] if index < len(self.consumer_routing_keys) else queue
+            if queue in seen_queues:
+                logger.warning(f"⚠️ Skipping duplicate consumer queue binding: {queue} (routing: {routing_key})")
+                continue
+            seen_queues.add(queue)
+            unique_queues.append(queue)
+            unique_routing_keys.append(routing_key)
+
+        self.consumer_queues = unique_queues
+        self.consumer_routing_keys = unique_routing_keys
+        logger.info("✅ Resolved consumer queues: %s", ", ".join(self.consumer_queues))
+        logger.info("✅ Resolved consumer routing keys: %s", ", ".join(self.consumer_routing_keys))
         
         # Producer queue (send to Spring Boot)
         self.producer_queue = os.getenv("RABBITMQ_PRODUCER_QUEUE", "ai.category.update.queue")

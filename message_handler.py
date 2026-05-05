@@ -16,21 +16,18 @@ def handle_category_event(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     
     Expected message format:
     {
-        "eventType": "CREATED" | "UPDATED" | "DELETED",
-        "categoryId": "uuid",
-        "userId": "uuid",
-        "categoryName": "Food & Dining",
-        "icon": "icon-name",
-        "limitAmount": 500.0,
-        "spentAmount": 0,
-        "timestamp": [2025, 11, 24, 22, 30, 43, 297742000]
+        "name": "Ăn sáng",
+        "icon": "string",
+        "userId": "af1eb20b-54e5-4910-b974-60151185e48f",
+        "budgetLimit": 10000,
+        "period": "MONTHLY" // set default 
     }
     """
     try:
-        event_type = message.get("eventType")
+        event_type = message.get("action")
         category_id = message.get("categoryId")
         user_id = message.get("userId")
-        category_name = message.get("categoryName")
+        category_name = message.get("name")
 
         logger.info(f"🏷️  Category Event: {event_type} | Category: {category_name} | User: {user_id}")
         
@@ -114,7 +111,8 @@ def handle_transaction_event(message: Dict[str, Any]) -> Optional[Dict[str, Any]
         logger.debug(f"📋 Full transaction message: {message}")
         
         # Map 'action' to 'eventType' (Spring Boot uses 'action', Python expects 'eventType')
-        event_type = message.get("action") or message.get("eventType")
+        event_type = message.get("action")
+        logger.info(f"💳 Processing transaction event: {event_type} for transaction ID: {message.get('transactionId')}")
         transaction_id = message.get("transactionId")
         user_id = message.get("userId")
         category_id = message.get("categoryId")
@@ -123,11 +121,11 @@ def handle_transaction_event(message: Dict[str, Any]) -> Optional[Dict[str, Any]
         amount = message.get("amount")
         tx_type = message.get("type")  # INCOME or EXPENSE
         
-        logger.info(f"💳 Transaction Event: {event_type} | User: {user_id} | Category: {category_name} | Amount: {amount} ({tx_type})")
+        logger.info(f"💳 Transaction Event: {event_type} | User: {user_id} | Category: {category_name} | Amount: {amount} ({tx_type}), description: {description}")
         
         # Check if required fields are missing
         if not event_type:
-            logger.warning(f"⚠️  Missing 'action' or 'eventType' in message. Available keys: {list(message.keys())}")
+            logger.warning(f"⚠️  Missing 'action' in message. Available keys: {list(message.keys())}")
             return {
                 "status": "error",
                 "message": "Missing 'action' field in transaction event"

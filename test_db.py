@@ -11,7 +11,7 @@ def test_connection():
         # get from .env file
         db = SQLDatabase.from_uri(os.getenv("POSTGRES_URI"))
         # try call API POST https://api-budget-tracker.manportfolio.id.vn/api/v1/categories with Authorization Bearer token from .env file
-        token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZjFlYjIwYi01NGU1LTQ5MTAtYjk3NC02MDE1MTE4NWU0OGYiLCJhY2NvdW50SWQiOiIzNTcwMmZiMy04NjYyLTRmYmMtOGZiNC00Mjc3YTUwNGM3YmEiLCJlbWFpbCI6ImRlbW8wMDFAZ21haWwuY29tIiwicm9sZXMiOiJST0xFX1VTRVIiLCJpYXQiOjE3Nzc3Mjg5OTksImV4cCI6MTc3NzgxNTM5OX0.aKWSZNPJSSt0V5Rli03RxLxJFe1d9qQCK-t0nLx9scw"
+        token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZjFlYjIwYi01NGU1LTQ5MTAtYjk3NC02MDE1MTE4NWU0OGYiLCJhY2NvdW50SWQiOiIzNTcwMmZiMy04NjYyLTRmYmMtOGZiNC00Mjc3YTUwNGM3YmEiLCJlbWFpbCI6ImRlbW8wMDFAZ21haWwuY29tIiwicm9sZXMiOiJST0xFX1VTRVIiLCJpYXQiOjE3Nzc4Nzk4MTIsImV4cCI6MTc3Nzk2NjIxMn0.mcAePJb40MFfMYKuXWk_jBSs2KhRWpeOkWguyfb90ME"
         import httpx
         response = httpx.post(
             "https://api-budget-tracker.manportfolio.id.vn/api/v1/transactions",
