@@ -15,15 +15,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from rabbitmq_service import get_rabbitmq_service
-from message_handler import handle_message
-from routes import (
-    categories_router,
-    analysis_router,
-    chat_router,
-    rabbitmq_router,
-)
-from agents.orchestrator.graph import build_main_graph
+# Defer heavy imports until startup to avoid preloading during `uvicorn --reload`.
+# They will be imported inside the `lifespan` context manager below.
 
 # ============================================
 # Logging Configuration
@@ -50,8 +43,23 @@ async def lifespan(app: FastAPI):
     - Background consumer startup
     - Graceful shutdown and cleanup
     """
+    from rabbitmq_service import get_rabbitmq_service
+    from message_handler import handle_message
+    from agents.orchestrator.graph import build_main_graph
+    from routes import (
+        categories_router,
+        analysis_router,
+        chat_router,
+        rabbitmq_router,
+    )
+
+    # Re-register routers at startup (safe to call multiple times)
+    app.include_router(categories_router)
+    app.include_router(analysis_router)
+    app.include_router(chat_router)
+    app.include_router(rabbitmq_router)
+    # Initialize RabbitMQ service instance after imports
     rabbitmq = get_rabbitmq_service()
-    
     try:
         # Startup
         # Initialize the orchestrator graph used by chat and routing
@@ -126,14 +134,7 @@ async def global_exception_handler(request, exc):
     )
 
 
-# ============================================
-# Include Routers
-# ============================================
-
-app.include_router(categories_router)
-app.include_router(analysis_router)
-app.include_router(chat_router)
-app.include_router(rabbitmq_router)
+# Routers are included at startup inside the lifespan context to avoid heavy imports on module load.
 
 
 # ============================================
@@ -159,6 +160,7 @@ def health_check():
     
     Returns service status and component health.
     """
+    from rabbitmq_service import get_rabbitmq_service
     rabbitmq = get_rabbitmq_service()
     rabbitmq_healthy = rabbitmq.connection and rabbitmq.connection.is_open
     

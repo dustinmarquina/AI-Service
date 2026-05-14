@@ -11,10 +11,18 @@ try:
 except ImportError:
     from model_loader import load_model
 import numpy as np
-
 # Pick small for speed; upgrade to ...-base later if needed
 
-model = load_model()
+# Lazy model and centroids to avoid heavy HF downloads at import time
+_model = None
+_default_centroids = None
+
+def get_model():
+    global _model
+    if _model is None:
+        _model = load_model()
+    return _model
+
 mongo_uri = "mongodb+srv://giathinh:qOI7BTIkAcOM8kTN@spring-base-project.dn9zo.mongodb.net/base-security?retryWrites=true&w=majority&appName=Spring-Base-Project"
 client = MongoClient(mongo_uri)
 db = client["base-security"]
@@ -61,26 +69,33 @@ def modelize(raw: str, userId: str = None) -> Dict[str, object]:
  
     # B) Embeddings (optional)
     # elif use_embeddings:
-    cid = categorizeItem(userId, clean_example_text(raw))
+    category = categorizeItem(userId, clean_example_text(raw))
     return {
         "raw": raw, "amount": amount, "direction": direction,
-        "categoryId": cid,
+        "categoryId": category["categoryId"],
+        "categoryName": category["categoryName"],
+        "confidence": category["confidence"],
     }
 
-# Build class centroids (you can recompute whenever you add examples)
-X = model.encode([t for t,_ in examples], normalize_embeddings=True)
-Y = np.array([labels.index(y) for _,y in examples])
-centroids = []
-for i,lab in enumerate(labels):
-    vecs = X[Y==i]
-    if len(vecs)==0:
-        seed_texts = [labels[i], *aliases, labels[i].lower().replace("&","and")]
-        c = model.encode(seed_texts, normalize_embeddings=True).mean(axis=0)
-        centroids.append(c/np.linalg.norm(c))
-    else:
-        c = vecs.mean(axis=0)
-        centroids.append(c/np.linalg.norm(c))
-centroids = np.vstack(centroids)
+def _build_default_centroids():
+    global _default_centroids
+    if _default_centroids is not None:
+        return _default_centroids
+    model = get_model()
+    X = model.encode([t for t,_ in examples], normalize_embeddings=True)
+    Y = np.array([labels.index(y) for _,y in examples])
+    centroids = []
+    for i, lab in enumerate(labels):
+        vecs = X[Y == i]
+        if len(vecs) == 0:
+            seed_texts = [labels[i], *aliases, labels[i].lower().replace("&", "and")]
+            c = model.encode(seed_texts, normalize_embeddings=True).mean(axis=0)
+            centroids.append(c / np.linalg.norm(c))
+        else:
+            c = vecs.mean(axis=0)
+            centroids.append(c / np.linalg.norm(c))
+    _default_centroids = np.vstack(centroids)
+    return _default_centroids
 
 
 
@@ -97,7 +112,7 @@ def initUserCategory(userId: str):
         cat_examples = [
             {
                 "text": remove_accents(ex_text),
-                "embedding": model.encode([remove_accents(ex_text)], normalize_embeddings=True)[0].tolist()
+                "embedding": get_model().encode([remove_accents(ex_text)], normalize_embeddings=True)[0].tolist()
             }
             for ex_text, ex_cat in examples if ex_cat == cat
         ]
@@ -130,7 +145,7 @@ def addCustomCategory(userId: str, categoryId: str, categoryName: str):
     existing = category_collection.find_one({"userId": userId, "categoryId": categoryId})
     if existing:
         return "Category already exists."
-    initial_example  = model.encode([accentfree_name], normalize_embeddings=True)[0].tolist()
+    initial_example  = get_model().encode([accentfree_name], normalize_embeddings=True)[0].tolist()
     new_category = {
         "userId": userId,
         "categoryId": categoryId,
@@ -151,12 +166,17 @@ def categorizeItem(userId: str, item: str):
         return "User categories not initialized."
     remove_accents_item = remove_accents(item)
     clean_example_text_item = clean_example_text(remove_accents_item)
-    v = model.encode([clean_example_text_item], normalize_embeddings=True)[0]
+    v = get_model().encode([clean_example_text_item], normalize_embeddings=True)[0]
     centroid_vec = [e["centroid"] for e in user_categories]
     sims = centroid_vec @ v
     print(sims)
     i = int(np.argmax(sims)); score = float(sims[i])
-    return (user_categories[i]["categoryId"] if score>=0.7 else "Other/Review")
+    matched_category = user_categories[i] if score >= 0.7 else None
+    return {
+        "categoryId": matched_category["categoryId"] if matched_category else "Other/Review",
+        "categoryName": matched_category["categoryName"] if matched_category else "Other/Review",
+        "confidence": score,
+    }
     
 
 # Add a new example sentence to a user's category
@@ -190,10 +210,10 @@ def addCategoryExample(userId: str, categoryName: str, example: str):
                     axis=0
                 ).tolist()
             else:
-                new_centroid = model.encode(
-                    [remove_accents(cat["categoryName"])],
-                    normalize_embeddings=True
-                )[0].tolist()
+                    new_centroid = get_model().encode(
+                        [remove_accents(cat["categoryName"])],
+                        normalize_embeddings=True
+                    )[0].tolist()
 
             category_collection.update_one(
                 {"userId": userId, "categoryId": cat["categoryId"]},
@@ -205,7 +225,7 @@ def addCategoryExample(userId: str, categoryName: str, example: str):
         {"userId": userId, "categoryId": categoryId},
         {"$push": {"exampleList": {
             "text": clean_example,
-            "embedding": model.encode([remove_accents(clean_example)], normalize_embeddings=True)[0].tolist()
+            "embedding": get_model().encode([remove_accents(clean_example)], normalize_embeddings=True)[0].tolist()
         }}}
     )
     updated_cat = category_collection.find_one({"userId": userId, "categoryId": categoryId})
@@ -245,7 +265,7 @@ def addCategoryExampleByCatgoryId(userId: str, categoryId: str, example: str):
                     axis=0
                 ).tolist()
             else:
-                new_centroid = model.encode(
+                new_centroid = get_model().encode(
                     [remove_accents(cat["categoryName"])],
                     normalize_embeddings=True
                 )[0].tolist()
@@ -258,7 +278,7 @@ def addCategoryExampleByCatgoryId(userId: str, categoryId: str, example: str):
         {"userId": userId, "categoryId": categoryId},
         {"$push": {"exampleList": {
             "text": clean_example,
-            "embedding": model.encode([clean_example], normalize_embeddings=True)[0].tolist()
+            "embedding": get_model().encode([clean_example], normalize_embeddings=True)[0].tolist()
         }}}
     )
     updated_cat = category_collection.find_one({"userId": userId, "categoryId": categoryId})
@@ -286,10 +306,10 @@ def resetCentroids(userId: str, categoryId = None):
                 axis=0
             ).tolist()
         else:
-            new_centroid = model.encode(
-                [remove_accents(cat["categoryName"])],
-                normalize_embeddings=True
-            )[0].tolist()
+                new_centroid = get_model().encode(
+                    [remove_accents(cat["categoryName"])],
+                    normalize_embeddings=True
+                )[0].tolist()
         category_collection.update_one(
             {"userId": userId, "categoryId": cat["categoryId"]},
             {"$set": {"centroid": new_centroid}}
@@ -314,7 +334,9 @@ def deleteCategoryByUserId(userId: str):
     return "User categories deleted."
 
 def classify_desc(text: str, thres=0.55):
+    model = get_model()
     v = model.encode([text], normalize_embeddings=True)[0]
+    centroids = _build_default_centroids()
     sims = centroids @ v
     i = int(np.argmax(sims)); score = float(sims[i])
     return (labels[i] if score>=thres else "Other/Review", score)

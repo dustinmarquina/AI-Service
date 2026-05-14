@@ -12,9 +12,7 @@ class State(TypedDict):
     session_id: Optional[str]
     user_id: Optional[str]
     token: Optional[str]
-
-  
-
+    route: Optional[str]
     response: Optional[str]
 
     # pending_transaction: Optional[dict]

@@ -74,7 +74,7 @@ def test_connection():
 
         print(f"Dialect: {db.dialect}")
         print(f"Available tables: {db.get_usable_table_names()}")
-        print(f'Table info: {db.get_table_info(["categories"])}')
+        print(f'Table info: {db.get_table_info(["wallets"])}')
 
 
         print("✅ Connected successfully")

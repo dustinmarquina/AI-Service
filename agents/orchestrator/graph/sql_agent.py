@@ -12,20 +12,71 @@ from agents.orchestrator.llm import get_sql_llm
 
 load_dotenv()
 
+POSTGRES_URI = os.getenv("POSTGRES_URI", "").strip()
+
 SQL_AGENT_SYSTEM_PROMPT = """You are a SQL assistant for a PostgreSQL database.
 
-Use the available SQL tools to inspect the schema and answer the user's question.
+Treat the schema below as the authoritative source for table definitions and types. Use this provided schema directly when composing SELECT queries or answering schema-related questions. Only consult or introspect the live database schema if a SQL execution fails when run against the real database.
+
+If you cannot produce a correct answer or SQL based solely on the provided schema, respond with the exact token NEED_TOOL so the agent can retry using DB-introspection tools.
+
+TABLE transactions (
+    id UUID NOT NULL,
+    amount NUMERIC(19, 2) NOT NULL,
+    type VARCHAR(50) NOT NULL,
+    category_id UUID,
+    category_name VARCHAR(255),
+    description VARCHAR(255),
+    wallet_id UUID,
+    user_id UUID NOT NULL,
+    transaction_date TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    image_url VARCHAR(1024),
+    external_transaction_id VARCHAR(255),
+    PRIMARY KEY (id)
+)
+TABLE wallets (
+        id UUID NOT NULL, 
+        name VARCHAR(255) NOT NULL, 
+        balance NUMERIC(19, 2) NOT NULL, 
+        currency VARCHAR(3) NOT NULL, 
+        wallet_type VARCHAR(50) NOT NULL, 
+        provider VARCHAR(255), 
+        provider_account_id VARCHAR(255), 
+        user_id UUID NOT NULL, 
+        active BOOLEAN DEFAULT true NOT NULL, 
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+        CONSTRAINT wallets_pkey PRIMARY KEY (id)
+)
+
+TABLE categories (
+    id UUID NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    icon VARCHAR(255),
+    user_id UUID NOT NULL,
+    budget_limit NUMERIC(19, 2),
+    period VARCHAR(50),
+    active BOOLEAN DEFAULT true NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    color VARCHAR(32),
+    PRIMARY KEY (id)
+)
+
 Rules:
-- Prefer SELECT-only queries.
+- Allow SELECT-only queries.
 - Never write INSERT, UPDATE, DELETE, DROP, or other destructive statements.
 - Use at most 5 rows unless the user explicitly asks for a larger sample.
 - When the user asks for totals, counts, or summaries, use SQL tools instead of guessing.
 - Return a short answer in Vietnamese when the result is ready.
+- If possible, return as Vietnamese table. Otherwise, return a concise Vietnamese summary.
 """
 
 
 def _build_sql_context() -> tuple[SQLDatabase, Any, list[Any]]:
-    postgres_uri = os.getenv("POSTGRES_URI", "").strip()
+    postgres_uri = POSTGRES_URI
     if not postgres_uri:
         raise RuntimeError("POSTGRES_URI is not set")
 
@@ -42,9 +93,35 @@ def _build_sql_state_graph() -> StateGraph:
 
     async def sql_chat_node(state: MessagesState):
         messages = list(state.get("messages", []))
-        response = await llm_with_tools.ainvoke(
-            [SystemMessage(content=f"{SQL_AGENT_SYSTEM_PROMPT}\nDialect: {db.dialect}")] + messages
+
+        # First, ask the base model (without tools) to answer using ONLY the provided schema.
+        strict_system = SystemMessage(
+            content=(
+                f"{SQL_AGENT_SYSTEM_PROMPT}\nDialect: {db.dialect}\n"
+                "StrictMode: Use only the provided schema. If you cannot answer or generate correct SQL based on this schema, respond with the exact token NEED_TOOL."
+            )
         )
+
+        try:
+            response = await model.ainvoke([strict_system] + messages)
+        except Exception:
+            # If the model invocation fails for any reason, fall back to tool-enabled model.
+            response = None
+
+        # If the model explicitly asks for tools (by returning NEED_TOOL) or the call failed, use tools.
+        need_tools = False
+        if response is None:
+            need_tools = True
+        else:
+            content = getattr(response, "content", "") or ""
+            if "NEED_TOOL" in content:
+                need_tools = True
+
+        if need_tools:
+            response = await llm_with_tools.ainvoke(
+                [SystemMessage(content=f"{SQL_AGENT_SYSTEM_PROMPT}\nDialect: {db.dialect}")] + messages
+            )
+
         return {"messages": [response]}
 
     graph = StateGraph(MessagesState)

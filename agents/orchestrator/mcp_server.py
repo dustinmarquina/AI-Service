@@ -7,9 +7,6 @@ from contextvars import ContextVar
 import httpx
 from dotenv import load_dotenv
 from fastmcp import FastMCP
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-
 logging.basicConfig(level=logging.INFO, format="%(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -21,21 +18,6 @@ load_dotenv()
 
 current_token: ContextVar[str] = ContextVar("current_token", default="")
 current_user_id: ContextVar[str] = ContextVar("current_user_id", default="")
-
-
-class CredentialMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        auth = request.headers.get("Authorization", "")
-        token = auth.removeprefix("Bearer ").strip()
-        user_id = request.headers.get("X-User-Id", "")
-
-        t = current_token.set(token)
-        u = current_user_id.set(user_id)
-        try:
-            return await call_next(request)
-        finally:
-            current_token.reset(t)
-            current_user_id.reset(u)
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +88,12 @@ class APIError(Exception):
         super().__init__(f"Backend error {status_code}: {data}")
 
 
+mcp = FastMCP(name="transaction-service")
+
+
+
+
+
 async def _api_call(
     method: str,
     url: str,
@@ -121,6 +109,8 @@ async def _api_call(
     Raises APIError on 4xx/5xx and httpx.HTTPError on network failure.
     """
     headers: Dict[str, str] = {"Content-Type": "application/json"}
+    #log contextual info
+    
     if bearer:
         headers["Authorization"] = f"Bearer {bearer}"
 
@@ -166,7 +156,7 @@ def _auth_error_message(status_code: int) -> str:
 # MCP server & tools
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("transaction-service")
+
 
 
 @mcp.tool()

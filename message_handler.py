@@ -144,6 +144,12 @@ def handle_transaction_event(message: Dict[str, Any]) -> Optional[Dict[str, Any]
                 logger.info(f"🔍 Classifying transaction: {description}")
                 result = categorizeItem(userId=user_id, item=description)
                 logger.info(f"✅ Classification result: {result}")
+                if isinstance(result, dict):
+                    classified_category_id = result.get("categoryId", category_id)
+                    classified_category_name = result.get("categoryName", category_name)
+                else:
+                    classified_category_id = result or category_id
+                    classified_category_name = category_name
                 
                 # Add as example if category ID provided
                 if category_id:
@@ -154,8 +160,9 @@ def handle_transaction_event(message: Dict[str, Any]) -> Optional[Dict[str, Any]
                     "status": "success",
                     "transactionId": transaction_id,
                     "userId": user_id,
-                    "categoryId": result or category_id,
-                    "categoryName": category_name,
+                    "categoryId": classified_category_id,
+                    "categoryName": classified_category_name,
+                    "confidence": result.get("confidence") if isinstance(result, dict) else None,
                     "amount": amount,
                     "type": tx_type,
                     "message": f"Transaction created and classified successfully"
