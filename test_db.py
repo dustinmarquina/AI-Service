@@ -1,15 +1,15 @@
 from dotenv import load_dotenv
 from pymongo import response
 load_dotenv(override=True)
-from mcp_service.tools.db_connect import connect_to_postgres
-from langchain_community.utilities import SQLDatabase
+# from mcp_service.tools.db_connect import connect_to_postgres
+# from langchain_community.utilities import SQLDatabase
 import os
 
 
 def test_connection():
     try:
         # get from .env file
-        db = SQLDatabase.from_uri(os.getenv("POSTGRES_URI"))
+        # db = SQLDatabase.from_uri(os.getenv("POSTGRES_URI"))
         # try call API POST https://api-budget-tracker.manportfolio.id.vn/api/v1/categories with Authorization Bearer token from .env file
         # token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZjFlYjIwYi01NGU1LTQ5MTAtYjk3NC02MDE1MTE4NWU0OGYiLCJhY2NvdW50SWQiOiIzNTcwMmZiMy04NjYyLTRmYmMtOGZiNC00Mjc3YTUwNGM3YmEiLCJlbWFpbCI6ImRlbW8wMDFAZ21haWwuY29tIiwicm9sZXMiOiJST0xFX1VTRVIiLCJpYXQiOjE3Nzc4Nzk4MTIsImV4cCI6MTc3Nzk2NjIxMn0.mcAePJb40MFfMYKuXWk_jBSs2KhRWpeOkWguyfb90ME"
         # import httpx
@@ -72,18 +72,63 @@ def test_connection():
         # print("\n--- CURRENT USER ---")
         # print(db.run("SELECT current_user;"))
 
-        print(f"Dialect: {db.dialect}")
-        print(f"Available tables: {db.get_usable_table_names()}")
-        print(f'Table info: {db.get_table_info(["wallets"])}')
+        # print(f"Dialect: {db.dialect}")
+        # print(f"Available tables: {db.get_usable_table_names()}")
+        # print(f'Table info: {db.get_table_info(["wallets"])}')
 
 
-        print("✅ Connected successfully")
+        # print("✅ Connected successfully")
+
+        #test chat groq with a simple prompt
+        # from agents.orchestrator.llm import get_9router_llm
+        # llm = get_9router_llm()
+        # response = llm.invoke("what time is it?")
+        # print("LLM Response:", response.content)
+
+        # DEBUG: make a raw HTTP request to determine the exact endpoint and response
+        # try:
+        #     import httpx
+        #     client_obj = getattr(llm, 'client', None)
+        #     base = None
+        #     api_key = os.getenv('9router_api_key') or os.getenv('GROQ_API_KEY')
+        #     if client_obj and hasattr(client_obj, '_client'):
+        #         base = getattr(client_obj._client, 'base_url', None)
+        #     print("[debug] groq client base:", base)
+        #     if base:
+        #         candidates = [
+        #             '/v1/chat/completions',
+        #             '/openai/v1/chat/completions',
+        #             '/api/v1/chat/completions',
+        #         ]
+        #         header_variants = [
+        #             {'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
+        #             {'x-api-key': api_key, 'Content-Type': 'application/json'},
+        #         ]
+        #         payload = {
+        #             'model': llm.model_name,
+        #             'messages': [
+        #                 {'role': 'user', 'content': [{'type': 'text', 'text': 'What is 2 + 2?'}]}
+        #             ],
+        #         }
+        #         for path in candidates:
+        #             url = str(base).rstrip('/') + path
+        #             for headers in header_variants:
+        #                 try:
+        #                     r = httpx.post(url, json=payload, headers=headers, timeout=15.0)
+        #                     print('[debug] POST', url, 'headers=', list(headers.keys()), '->', r.status_code)
+        #                     text = r.text
+        #                     print('[debug] resp starts with:', text[:200])
+        #                 except Exception as e:
+        #                     print('[debug] request to', url, 'failed:', e)
+        # except Exception as e:
+        #     print('[debug] direct request failed:', e)
 
         # tables = db.get_usable_table_names()
         # print("Tables:", tables)
 
     except Exception as e:
         print("❌ Connection failed:", e)
+
 
 if __name__ == "__main__":
     test_connection()
