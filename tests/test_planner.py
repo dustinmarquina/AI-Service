@@ -81,6 +81,29 @@ class PlannerFallbackTests(unittest.TestCase):
 
         self.assertEqual(result["route"], "sql_agent")
 
+    def test_routes_latest_transaction_query_to_sql_agent(self):
+        PLANNER_MODULE._get_llm = lambda: _RaisingLLM()
+
+        result = asyncio.run(
+            planner_node({"messages": [HumanMessage(content="Lần chi tiêu gần nhất của tôi")]})
+        )
+
+        self.assertEqual(result["route"], "sql_agent")
+
+    def test_accepts_sql_agent_route_from_classifier(self):
+        PLANNER_MODULE._get_llm = lambda: _StaticLLM(
+            '{"route":"sql_agent","reason":"read-only reporting query"}'
+        )
+
+        result = asyncio.run(
+            planner_node({"messages": [HumanMessage(content="Tổng chi tuần vừa rồi")]})
+        )
+
+        self.assertEqual(result["route"], "sql_agent")
+
+    def test_planner_prompt_treats_bare_finance_queries_as_current_user(self):
+        self.assertIn("authenticated current user", PLANNER_MODULE.PLANNER_SYSTEM_PROMPT)
+
 
 if __name__ == "__main__":
     unittest.main()

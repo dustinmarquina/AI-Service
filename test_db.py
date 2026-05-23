@@ -2,14 +2,15 @@ from dotenv import load_dotenv
 from pymongo import response
 load_dotenv(override=True)
 # from mcp_service.tools.db_connect import connect_to_postgres
-# from langchain_community.utilities import SQLDatabase
+from langchain_community.utilities import SQLDatabase
 import os
 
 
 def test_connection():
     try:
         # get from .env file
-        # db = SQLDatabase.from_uri(os.getenv("POSTGRES_URI"))
+        db = SQLDatabase.from_uri(os.getenv("POSTGRES_URI", "").strip())
+        # print("✅ Connected successfully")
         # try call API POST https://api-budget-tracker.manportfolio.id.vn/api/v1/categories with Authorization Bearer token from .env file
         # token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZjFlYjIwYi01NGU1LTQ5MTAtYjk3NC02MDE1MTE4NWU0OGYiLCJhY2NvdW50SWQiOiIzNTcwMmZiMy04NjYyLTRmYmMtOGZiNC00Mjc3YTUwNGM3YmEiLCJlbWFpbCI6ImRlbW8wMDFAZ21haWwuY29tIiwicm9sZXMiOiJST0xFX1VTRVIiLCJpYXQiOjE3Nzc4Nzk4MTIsImV4cCI6MTc3Nzk2NjIxMn0.mcAePJb40MFfMYKuXWk_jBSs2KhRWpeOkWguyfb90ME"
         # import httpx
@@ -72,10 +73,13 @@ def test_connection():
         # print("\n--- CURRENT USER ---")
         # print(db.run("SELECT current_user;"))
 
-        # print(f"Dialect: {db.dialect}")
-        # print(f"Available tables: {db.get_usable_table_names()}")
-        # print(f'Table info: {db.get_table_info(["wallets"])}')
+        print(f"Dialect: {db.dialect}")
+        print(f"Available tables: {db.get_usable_table_names()}")
+        print(f'Table info: {db.get_table_info(["wallets"])}')
+        #execute a simple query
+        result = db.run("SELECT id, name FROM wallets WHERE user_id = 'af1eb20b-54e5-4910-b974-60151185e48f';")
 
+        print(f"Query Result: {result}")
 
         # print("✅ Connected successfully")
 

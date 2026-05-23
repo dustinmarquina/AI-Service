@@ -3,10 +3,9 @@ import os
 import re
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage
 from langgraph.types import interrupt
 
-from .sql_agent import get_sql_agent
 from .state import State
 
 logger = logging.getLogger(__name__)
@@ -44,70 +43,6 @@ def _resolve_args(args: dict, step_results: dict[str, Any]) -> dict:
 # ---------------------------------------------------------------------------
 # SQL result extraction
 # ---------------------------------------------------------------------------
-
-_UUID_RE = re.compile(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-    re.IGNORECASE,
-)
-
-
-def _extract_sql_rows(result: dict) -> list[dict]:
-    """
-    Extract structured rows from the SQL agent result.
-
-    The SQL agent returns a Vietnamese natural-language answer. We parse it
-    looking for wallet/category rows. Supports two formats:
-
-    Format A — one UUID per line with a name:
-        "1. Tiền mặt (uuid-...)\n2. VCB (uuid-...)"
-
-    Format B — JSON array in the message content.
-    """
-    messages = result.get("messages", [])
-    content = ""
-    for m in reversed(messages):
-        if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None):
-            content = str(m.content).strip()
-            break
-
-    # Try JSON first
-    try:
-        import json
-        # find a JSON array anywhere in the content
-        array_match = re.search(r"\[.*\]", content, re.DOTALL)
-        if array_match:
-            data = json.loads(array_match.group(0))
-            if isinstance(data, list) and all(isinstance(r, dict) for r in data):
-                return data
-    except Exception:
-        pass
-
-    # Extract UUIDs with optional adjacent name
-    uuids = _UUID_RE.findall(content)
-    if not uuids:
-        return []
-
-    if len(uuids) == 1:
-        # Single result — no need for user selection
-        return [{"id": uuids[0], "value": uuids[0], "name": "", "raw": content}]
-
-    # Multiple UUIDs — try to pair each with a name from the same line
-    rows = []
-    for uuid in uuids:
-        # Find the line containing this UUID
-        for line in content.splitlines():
-            if uuid.lower() in line.lower():
-                # Strip the UUID and numbering to get the name
-                name = _UUID_RE.sub("", line)
-                name = re.sub(r"^\s*\d+[\.\)]\s*", "", name)  # remove "1. " prefix
-                name = name.strip(" ()-:,")
-                rows.append({"id": uuid, "name": name or uuid[:8], "raw": line.strip()})
-                break
-        else:
-            rows.append({"id": uuid, "name": uuid[:8], "raw": uuid})
-
-    return rows
-
 
 def _build_wallet_prompt(rows: list[dict]) -> str:
     lines = ["Bạn có các ví sau, chọn ví muốn dùng:"]
@@ -164,7 +99,7 @@ async def executor_node(state: State) -> dict:
         step_index + 1, len(steps), step_id, step_type,
     )
 
-    # ── SQL step ──────────────────────────────────────────────────────────────
+    # ── SQL step — direct asyncpg, no LLM ────────────────────────────────────
     if step_type == "sql":
         query_hint = current.get("query_hint", "")
         description = current.get("description", "")
@@ -172,21 +107,36 @@ async def executor_node(state: State) -> dict:
 
         user_id = str(state.get("user_id") or os.getenv("TRANSACTION_USER_ID", "")).strip()
         if user_id:
-            query_hint = query_hint.replace(":user_id", f"'{user_id}'")
+            query_hint = query_hint.replace(":user_id", f"\'{user_id}\'")
 
-        prompt = (
-            f"{description}\n\nSQL hint:\n{query_hint}" if query_hint else description
-        )
+        logger.info("executor: sql step %s context description=%s user_id=%s", step_id, description, user_id)
+        logger.info("executor: sql step %s query_hint(raw)=%s", step_id, current.get("query_hint", ""))
+        logger.info("executor: sql step %s query_hint(resolved)=%s", step_id, query_hint)
 
-        sql_agent = get_sql_agent()
-        result = await sql_agent.ainvoke({"messages": [HumanMessage(content=prompt)]})
-        rows = _extract_sql_rows(result)
+        if not query_hint:
+            logger.error("executor: sql step %s has no query_hint, cannot execute", step_id)
+            return {
+                "messages": [AIMessage(content=f"Lỗi: bước {step_id} thiếu câu truy vấn.")],
+                "step_index": len(steps),
+                "step_results": step_results,
+            }
+
+        from .db import execute_query
+        try:
+            rows = await execute_query(query_hint)
+        except Exception as exc:
+            logger.error("executor: sql step %s failed: %s", step_id, exc)
+            return {
+                "messages": [AIMessage(content=f"Lỗi truy vấn dữ liệu: {exc}")],
+                "step_index": len(steps),
+                "step_results": step_results,
+            }
 
         if not rows:
             logger.warning("executor: sql step %s returned no rows", step_id)
             return {
                 "messages": [AIMessage(content="Không tìm thấy dữ liệu phù hợp.")],
-                "step_index": len(steps),   # skip remaining steps
+                "step_index": len(steps),
                 "step_results": step_results,
             }
 
@@ -242,6 +192,7 @@ async def executor_node(state: State) -> dict:
     elif step_type == "tool":
         tool_name = current.get("name", "")
         raw_args = current.get("args", {})
+        write_to_state = current.get("write_to_state")  # e.g. "user_id"
 
         try:
             resolved_args = _resolve_args(raw_args, step_results)
@@ -258,7 +209,8 @@ async def executor_node(state: State) -> dict:
         runtime_user_id = str(state.get("user_id") or os.getenv("TRANSACTION_USER_ID", "")).strip()
         if runtime_token:
             resolved_args.setdefault("token", runtime_token)
-        if runtime_user_id:
+        # Only inject user_id for non-bootstrap tools (get_user_id resolves it)
+        if runtime_user_id and tool_name != "get_user_id":
             resolved_args.setdefault("user_id", runtime_user_id)
 
         logger.info("executor: calling tool '%s' args=%s", tool_name, {
@@ -272,10 +224,24 @@ async def executor_node(state: State) -> dict:
 
         logger.info("executor: step %s tool result=%s", step_id, str(tool_result)[:200])
 
-        return {
+        # write_to_state: propagate a result field directly into graph state
+        # e.g. get_user_id writes user_id so subsequent SQL steps can use :user_id
+        state_update: dict = {
             "step_index": step_index + 1,
             "step_results": step_results,
         }
+        if write_to_state and tool_result.get("status") == "success":
+            value = tool_result.get(write_to_state)
+            if value:
+                logger.info("executor: write_to_state %s=%s", write_to_state, value)
+                state_update[write_to_state] = value
+            else:
+                logger.warning(
+                    "executor: write_to_state '%s' not found in result: %s",
+                    write_to_state, tool_result,
+                )
+
+        return state_update
 
     else:
         logger.error("executor: unknown step type '%s'", step_type)

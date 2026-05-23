@@ -1,9 +1,12 @@
 import os
 import re
 import logging
+import json
+import base64
 from typing import Any, Dict, Optional
 from contextvars import ContextVar
 
+from .graph.state import State
 import httpx
 from dotenv import load_dotenv
 from fastmcp import FastMCP
@@ -163,6 +166,9 @@ def _auth_error_message(status_code: int) -> str:
 async def create_transaction(
     amount: str,
     description: str,
+    wallet_id: str = "",
+    category_name: str = "",
+    category_id: str = "",
     token: str = "",
     user_id: str = "",
 ) -> Dict[str, Any]:
@@ -171,6 +177,9 @@ async def create_transaction(
     Parameters:
     - amount      (str): transaction amount – supports shorthand like "50k", "20,000"
     - description (str): what the money was spent on, e.g. "ăn sáng", "cà phê"
+    - wallet_id   (str, optional): wallet UUID to record the expense against
+    - category_name (str, optional): category label for backend auto-matching
+    - category_id (str, optional): category UUID when already resolved
     - token       (str, optional): bearer token (falls back to request context / env)
     - user_id     (str, optional): user UUID     (falls back to request context / env)
     """
@@ -198,6 +207,12 @@ async def create_transaction(
         "description": description,
         "type": "EXPENSE",
     }
+    if str(wallet_id).strip():
+        payload["walletId"] = str(wallet_id).strip()
+    if str(category_name).strip():
+        payload["categoryName"] = str(category_name).strip()
+    if str(category_id).strip():
+        payload["categoryId"] = str(category_id).strip()
     logger.info("create_transaction: token=%s", _resolve_token(token))
     try:
         return await _api_call(
@@ -212,6 +227,48 @@ async def create_transaction(
     except httpx.HTTPError as exc:
         return _error_response(f"Request failed: {exc}")
 
+
+def extract_user_id_from_token(token: str) -> Optional[str]:
+    """Extract user id from JWT payload using the `sub` claim.
+
+    This performs payload decoding only (no signature verification).
+    """
+    raw = _strip_bearer(token)
+    if not raw:
+        return None
+
+    parts = raw.split(".")
+    if len(parts) != 3:
+        return None
+
+    payload_b64 = parts[1]
+    # JWT uses base64url without padding; restore padding for decoding.
+    padding = "=" * (-len(payload_b64) % 4)
+    try:
+        payload_bytes = base64.urlsafe_b64decode(payload_b64 + padding)
+        payload = json.loads(payload_bytes.decode("utf-8"))
+    except Exception:
+        logger.exception("extract_user_id_from_token: failed to decode JWT payload")
+        return None
+
+    sub = payload.get("sub")
+    if isinstance(sub, str) and sub.strip():
+        return sub.strip()
+    return None
+
+@mcp.tool()
+async def get_user_id(token: str = "") -> Dict[str, Any]:
+    """Get the user ID associated with the provided token. Alg: HS256"""
+    resolved_token = _resolve_token(token)
+    if not resolved_token:
+        return _error_response("No token provided.")
+
+    extracted_user_id = extract_user_id_from_token(resolved_token)
+    if not extracted_user_id:
+        return _error_response("Could not extract user_id from token `sub` claim.")
+
+    logger.info("get_user_id: extracted user_id=%s", extracted_user_id)
+    return {"status": "success", "user_id": extracted_user_id}
 
 @mcp.tool()
 async def create_category(

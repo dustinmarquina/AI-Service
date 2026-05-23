@@ -9,10 +9,13 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from agents.orchestrator.llm import get_sql_llm
+from .db import _build_database_dsn, TRANSACTIONS_DB_NAME, WALLETS_DB_NAME
 
 load_dotenv()
 
 POSTGRES_URI = os.getenv("POSTGRES_URI", "").strip()
+WALLETS_DB = _build_database_dsn(WALLETS_DB_NAME) if POSTGRES_URI else ""
+TRASACTIONS_DB = _build_database_dsn(TRANSACTIONS_DB_NAME) if POSTGRES_URI else ""
 
 SQL_AGENT_SYSTEM_PROMPT = """You are a SQL assistant for a PostgreSQL database.
 
@@ -70,20 +73,35 @@ Rules:
 - Never write INSERT, UPDATE, DELETE, DROP, or other destructive statements.
 - Use at most 5 rows unless the user explicitly asks for a larger sample.
 - When the user asks for totals, counts, or summaries, use SQL tools instead of guessing.
+- Bare finance queries like "lần chi tiêu gần nhất", "tổng chi tuần vừa rồi", or "số dư hiện tại" refer to the authenticated current user by default.
+- If authenticated runtime context includes a current_user_id, use it and do not ask the user to provide their user_id again.
 - Return a short answer in Vietnamese when the result is ready.
 - If possible, return as Vietnamese table. Otherwise, return a concise Vietnamese summary.
 """
 
 
 def _build_sql_context() -> tuple[SQLDatabase, Any, list[Any]]:
-    postgres_uri = POSTGRES_URI
-    if not postgres_uri:
+    if not POSTGRES_URI:
         raise RuntimeError("POSTGRES_URI is not set")
+    
+    if not WALLETS_DB or not TRASACTIONS_DB:
+        raise RuntimeError("WALLETS_DB and TRASACTIONS_DB must be configured")
 
     model = get_sql_llm()
-    db = SQLDatabase.from_uri(postgres_uri)
-    toolkit = SQLDatabaseToolkit(db=db, llm=model)
-    return db, model, toolkit.get_tools()
+    
+    # Create connections to both databases
+    wallets_db = SQLDatabase.from_uri(WALLETS_DB)
+    transactions_db = SQLDatabase.from_uri(TRASACTIONS_DB)
+    
+    # Create toolkits for each database
+    wallets_toolkit = SQLDatabaseToolkit(db=wallets_db, llm=model)
+    transactions_toolkit = SQLDatabaseToolkit(db=transactions_db, llm=model)
+    
+    # Combine all tools from both databases
+    all_tools = wallets_toolkit.get_tools() + transactions_toolkit.get_tools()
+    
+    # Return wallets_db for dialect info, model, and combined tools
+    return wallets_db, model, all_tools
 
 
 def _build_sql_state_graph() -> StateGraph:
@@ -108,14 +126,22 @@ def _build_sql_state_graph() -> StateGraph:
             # If the model invocation fails for any reason, fall back to tool-enabled model.
             response = None
 
-        # If the model explicitly asks for tools (by returning NEED_TOOL) or the call failed, use tools.
+        # If the model explicitly asks for tools (by returning NEED_TOOL),
+        # or the call failed, or the model returned a raw SQL statement,
+        # use tools so the query is executed against the DB.
         need_tools = False
         if response is None:
             need_tools = True
         else:
             content = getattr(response, "content", "") or ""
+            # If model asks for NEED_TOOL, or if it returned a SQL code block
+            # or an explicit SELECT ... FROM statement, we should run with tools.
             if "NEED_TOOL" in content:
                 need_tools = True
+            else:
+                import re as _re
+                if "```sql" in content.lower() or _re.search(r"\bselect\b.+\bfrom\b", content, _re.IGNORECASE | _re.DOTALL):
+                    need_tools = True
 
         if need_tools:
             response = await llm_with_tools.ainvoke(
