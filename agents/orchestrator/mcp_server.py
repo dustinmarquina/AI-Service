@@ -5,6 +5,7 @@ import json
 import base64
 from typing import Any, Dict, Optional
 from contextvars import ContextVar
+from datetime import datetime
 
 from .graph.state import State
 import httpx
@@ -30,7 +31,7 @@ current_user_id: ContextVar[str] = ContextVar("current_user_id", default="")
 TRANSACTION_API_URL: str = os.getenv("TRANSACTION_API_URL", "")
 CATEGORY_API_URL: str = os.getenv("CATEGORY_API_URL", "")
 DEFAULT_USER_ID: str = os.getenv("TRANSACTION_USER_ID", "")
-
+REPORT_API_URL: str = os.getenv("REPORT_API_URL", "")
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -160,7 +161,49 @@ def _auth_error_message(status_code: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+@mcp.tool()
+async def get_wallet_summary(token: str = "", user_id: str = "") -> Dict[str, Any]:
+    """Get a summary of the user's wallets and balances used to give advice on their financial health and spending habits based on their current financial situation.
 
+    Parameters:
+    - token (str): bearer token for authentication
+    Returns a dict with wallet summaries. Example:
+    {
+        "wallets": [
+            {
+                "walletId": "f0945566-9b1c-4c81-88e0-2da9d32806e6",
+                "name": "Ước có học bổng",
+                "walletType": "MANUAL",
+                "balance": -501236033.00,
+                "currency": "VND"
+            },
+            ...
+        ],
+        "totalBalance": -506874168.00
+    }
+    """
+    # `user_id` is accepted for executor compatibility; the token remains the primary auth input.
+    try:
+        wallet_summary = await _api_call(
+            "GET", f"{REPORT_API_URL}/wallet-summary",
+            bearer=_resolve_token(token),
+        )
+        month = datetime.now().month
+        year = datetime.now().year
+        date = f"{year}-{month:02d}" 
+        financial_health = await _api_call(
+            "GET", f"{REPORT_API_URL}/financial-health-score?month={date}",
+            bearer=_resolve_token(token),
+        )
+        return {
+            "status": "success",
+            "wallet_summary": wallet_summary.get("data", {}),
+            "financial_health_score": financial_health.get("data", {}).get("score"),
+        }
+    except APIError as exc:
+        return _error_response(_auth_error_message(exc.status_code), status_code=exc.status_code, data=exc.data)
+    except httpx.HTTPError as exc:
+        return _error_response(f"Request failed: {exc}")
 
 @mcp.tool()
 async def create_transaction(

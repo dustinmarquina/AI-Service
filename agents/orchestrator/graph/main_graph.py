@@ -1,6 +1,5 @@
 import logging
 import os
-import re
 import shlex
 from typing import Any
 
@@ -19,7 +18,6 @@ from .planner import clarify_node, planner_node, route_after_planner
 from .sql_agent import get_sql_agent
 from .state import State
 from .tool_registry import register_tools
-from .db import execute_query
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -27,7 +25,6 @@ logger = logging.getLogger(__name__)
 MAX_MEMORY_MESSAGES = 12
 SHORT_TERM_MEMORY: dict[str, InMemoryChatMessageHistory] = {}
 MCP_CLIENTS: list[Any] = []
-REPORT_TIMEZONE = "Asia/Ho_Chi_Minh"
 
 
 # ---------------------------------------------------------------------------
@@ -115,142 +112,8 @@ def _build_sql_agent_messages(state: State) -> list[Any]:
     return [context] + messages
 
 
-def _latest_human_text(state: State) -> str:
-    messages = list(state.get("messages", []))
-    latest_human = next((m for m in reversed(messages) if isinstance(m, HumanMessage)), None)
-    return " ".join(str(latest_human.content if latest_human else "").strip().lower().split())
-
-
-def _extract_recent_limit(text: str) -> int:
-    match = re.search(r"\b(\d+)\s+lần\b", text)
-    if not match:
-        return 1
-    return max(1, min(int(match.group(1)), 10))
-
-
-def _markdown_table(headers: list[str], rows: list[list[str]]) -> str:
-    header_line = "| " + " | ".join(headers) + " |"
-    separator_line = "| " + " | ".join("---" for _ in headers) + " |"
-    body_lines = ["| " + " | ".join(row) + " |" for row in rows]
-    return "\n".join([header_line, separator_line] + body_lines)
-
-
-async def _try_direct_sql_report(state: State) -> AIMessage | None:
-    runtime_user_id = str(state.get("user_id") or os.getenv("TRANSACTION_USER_ID", "")).strip()
-    if not runtime_user_id:
-        return None
-
-    text = _latest_human_text(state)
-    if not text:
-        return None
-
-    if any(marker in text for marker in ("lần chi tiêu gần nhất", "chi tiêu gần nhất", "giao dịch gần nhất", "lần giao dịch gần nhất")):
-        limit = _extract_recent_limit(text)
-        rows = await execute_query(
-            "SELECT amount, category_name, description, transaction_date "
-            f"FROM transactions WHERE user_id = '{runtime_user_id}' AND type = 'EXPENSE' "
-            f"ORDER BY transaction_date DESC LIMIT {limit}"
-        )
-        if not rows:
-            return AIMessage(content="Mình chưa tìm thấy giao dịch chi tiêu nào gần đây.")
-
-        if limit > 1:
-            table_rows: list[list[str]] = []
-            for idx, row in enumerate(rows, 1):
-                amount = row.get("amount")
-                description = row.get("description") or "không có mô tả"
-                category_name = row.get("category_name") or "chưa phân loại"
-                transaction_date = str(row.get("transaction_date") or "")
-                amount_text = f"{int(amount):,} ₫" if amount is not None else "không rõ số tiền"
-                table_rows.append(
-                    [str(idx), amount_text, category_name, description, transaction_date]
-                )
-            return AIMessage(
-                content=(
-                    f"{limit} chi tiêu gần nhất của bạn:\n\n"
-                    + _markdown_table(
-                        ["#", "Số tiền", "Danh mục", "Mô tả", "Thời gian"],
-                        table_rows,
-                    )
-                )
-            )
-
-        row = rows[0]
-        amount = row.get("amount")
-        description = row.get("description") or "không có mô tả"
-        category_name = row.get("category_name") or "chưa phân loại"
-        transaction_date = str(row.get("transaction_date") or "")
-        amount_text = f"{int(amount):,} ₫" if amount is not None else "không rõ số tiền"
-        return AIMessage(
-            content=(
-                "Chi tiêu gần nhất của bạn:\n\n"
-                + _markdown_table(
-                    ["Số tiền", "Danh mục", "Mô tả", "Thời gian"],
-                    [[amount_text, category_name, description, transaction_date]],
-                )
-            )
-        )
-
-    if any(marker in text for marker in ("tổng chi tuần vừa rồi", "tổng chi 7 ngày qua", "chi tuần vừa rồi", "tổng chi tuần này")):
-        rows = await execute_query(
-            "SELECT COALESCE(SUM(amount), 0) AS total_amount "
-            f"FROM transactions WHERE user_id = '{runtime_user_id}' "
-            "AND type = 'EXPENSE' AND transaction_date >= NOW() - INTERVAL '7 days'"
-        )
-        total_amount = rows[0].get("total_amount") if rows else 0
-        total_text = f"{int(total_amount or 0):,} ₫"
-        return AIMessage(
-            content=(
-                "Tổng chi tuần vừa rồi của bạn:\n\n"
-                + _markdown_table(
-                    ["Khoảng thời gian", "Tổng chi"],
-                    [["7 ngày qua", total_text]],
-                )
-            )
-        )
-
-    today_markers = ("hôm nay", "ngày hôm nay", "today")
-    expense_markers = ("chi tiêu", "giao dịch", "đã chi", "tiêu gì", "việc gì")
-    if any(marker in text for marker in today_markers) and any(marker in text for marker in expense_markers):
-        rows = await execute_query(
-            "SELECT amount, category_name, description, transaction_date "
-            f"FROM transactions WHERE user_id = '{runtime_user_id}' AND type = 'EXPENSE' "
-            f"AND DATE(transaction_date AT TIME ZONE '{REPORT_TIMEZONE}') = "
-            f"DATE(NOW() AT TIME ZONE '{REPORT_TIMEZONE}') "
-            "ORDER BY transaction_date DESC LIMIT 10"
-        )
-        if not rows:
-            return AIMessage(content="Hôm nay bạn chưa có giao dịch chi tiêu nào.")
-
-        table_rows: list[list[str]] = []
-        total_amount = 0
-        for row in rows:
-            amount = row.get("amount")
-            description = row.get("description") or "không có mô tả"
-            category_name = row.get("category_name") or "chưa phân loại"
-            transaction_date = str(row.get("transaction_date") or "")
-            amount_value = int(amount or 0)
-            total_amount += amount_value
-            table_rows.append(
-                [f"{amount_value:,} ₫", category_name, description, transaction_date]
-            )
-
-        return AIMessage(
-            content=(
-                "Các khoản chi tiêu hôm nay của bạn:\n\n"
-                + _markdown_table(
-                    ["Số tiền", "Danh mục", "Mô tả", "Thời gian"],
-                    table_rows,
-                )
-                + "\n\n"
-                + _markdown_table(
-                    ["Chỉ số", "Giá trị"],
-                    [["Tổng chi hôm nay", f"{total_amount:,} ₫"]],
-                )
-            )
-        )
-
-    return None
+def _escape_prompt_braces(text: str) -> str:
+    return text.replace("{", "{{").replace("}", "}}").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +132,9 @@ async def build_main_graph():
         getattr(t, "name", ""): _field_names_from_tool(t) for t in tools
     }
     tools_catalog = "\n".join(
-        f"- {getattr(t, 'name', 'unknown')}: {getattr(t, 'description', '')}".strip()
+        _escape_prompt_braces(
+            f"- {getattr(t, 'name', 'unknown')}: {getattr(t, 'description', '')}"
+        )
         for t in tools
     ) or "- No MCP tools available"
 
@@ -311,11 +176,6 @@ Rules:
         return {"messages": [response]}
 
     async def sql_agent_node(state: State):
-        direct_response = await _try_direct_sql_report(state)
-        if direct_response is not None:
-            logger.info("sql_agent_node: direct_sql_fast_path")
-            return {"messages": [direct_response]}
-
         messages = _build_sql_agent_messages(state)
         result = await get_sql_agent().ainvoke({"messages": messages})
         final = next(

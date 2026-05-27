@@ -1,5 +1,3 @@
-from predictor import prepare_analysis_context, prepare_budget_context, prepare_prediction_context 
-
 OLLAMA_TOOLS = [
     {
         "type": "function",

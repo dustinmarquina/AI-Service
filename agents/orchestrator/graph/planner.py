@@ -7,6 +7,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from agents.orchestrator.llm import get_classifier_llm
 from .state import State
+from .tool_registry import describe_tools
 
 logger = logging.getLogger(__name__)
 
@@ -36,19 +37,6 @@ TABLE categories (
 )
 """.strip()
 
-TOOLS_SCHEMA = """
-TOOL get_user_id()
-  Resolves the current user's UUID from the bearer token.
-  Returns: {"status": "success", "user_id": "<uuid>"}
-  Always use this as the first step before any SQL query.
-
-TOOL create_transaction(amount: str, description: str, wallet_id: str, category_name: str?)
-  Records an EXPENSE transaction. Token is injected automatically — do not include it.
-
-TOOL create_category(name: str, icon: str?, budget_limit: str?, period: str?)
-  Creates a new spending category. Token is injected automatically — do not include it.
-""".strip()
-
 # ---------------------------------------------------------------------------
 # Bootstrap step constant
 # ---------------------------------------------------------------------------
@@ -65,13 +53,15 @@ GET_USER_ID_STEP = {
 # Planner prompt
 # ---------------------------------------------------------------------------
 
-PLANNER_SYSTEM_PROMPT = f"""You are a planner for a Vietnamese personal finance assistant.
+def _build_planner_system_prompt() -> str:
+        tools_schema = describe_tools()
+        return f"""You are a planner for a Vietnamese personal finance assistant.
 
 Database schema:
 {DB_SCHEMA}
 
 Available tools:
-{TOOLS_SCHEMA}
+{tools_schema}
 
 Given the user message and conversation history, output ONLY valid JSON — no markdown.
 
@@ -81,24 +71,24 @@ CASE 1 — pure conversation, read/query answer, or simple single-step write (no
 
 CASE 2 — any action that requires reading the database (sql query OR tool that needs wallet_id/category_id):
 {{
-  "route": "execute",
-  "reason": "...",
-  "steps": [
-    {{
-      "id": "s0",
-      "type": "tool",
-      "name": "get_user_id",
-      "args": {{}},
-      "write_to_state": "user_id"
-    }},
-    ... your steps here (sql or tool) ...
-  ]
+    "route": "execute",
+    "reason": "...",
+    "steps": [
+        {{
+            "id": "s0",
+            "type": "tool",
+            "name": "get_user_id",
+            "args": {{}},
+            "write_to_state": "user_id"
+        }},
+        ... your steps here (sql or tool) ...
+    ]
 }}
 ────────────────────────────────────────
 
 Route rules:
-- "chat"     : user wants to CREATE a transaction or category and NO db lookup is needed
-- "sql_agent": use this for READ/query/summarise/reporting requests
+- "chat"     : user wants to CREATE a transaction or category and NO db lookup is needed or asks about financial advice on expenses (e.g. "nên chi tiêu thế nào", "tư vấn tài chính cá nhân")
+- "sql_agent": use this for READ/query/summarise/reporting requests (more specifically, "what was top 3 spending categories last month?")
 - "execute"  : use this when user wants to write but needs wallet_id, category_id, or any DB value first
 - "finalize" : pure conversation, no finance action
 - "clarify"  : genuinely ambiguous
@@ -109,7 +99,7 @@ Step rules:
 - ALWAYS start steps with id="s0" get_user_id as the FIRST step.
 - After s0, use sql steps for DB reads and tool steps for writes.
 - CRITICAL: if a tool step uses a placeholder like "$s1.id", then a step with id="s1" MUST
-  exist earlier in the steps list. Never reference a step that isn't defined.
+    exist earlier in the steps list. Never reference a step that isn't defined.
 - Placeholder "$stepId.field" resolves to that field from the step result.
 - Scope all SQL to the current user: WHERE user_id = :user_id
 
@@ -327,7 +317,7 @@ async def planner_node(state: State) -> dict:
 
     llm = _get_llm()
     try:
-        response = await llm.ainvoke([SystemMessage(content=PLANNER_SYSTEM_PROMPT)] + history)
+        response = await llm.ainvoke([SystemMessage(content=_build_planner_system_prompt())] + history)
         raw = response.content if hasattr(response, "content") else str(response)
         result = _parse_planner_output(raw)
     except Exception as exc:

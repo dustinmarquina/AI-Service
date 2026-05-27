@@ -48,14 +48,12 @@ async def lifespan(app: FastAPI):
     from agents.orchestrator.graph import build_main_graph
     from routes import (
         categories_router,
-        analysis_router,
         chat_router,
         rabbitmq_router,
     )
 
     # Re-register routers at startup (safe to call multiple times)
     app.include_router(categories_router)
-    app.include_router(analysis_router)
     app.include_router(chat_router)
     app.include_router(rabbitmq_router)
     # Initialize RabbitMQ service instance after imports
