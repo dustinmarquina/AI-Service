@@ -1,5 +1,6 @@
 from encodings.aliases import aliases
 from pymongo import MongoClient
+import os
 import re
 from tx_sandbox import clean_example_text, extract_amount, remove_accents, parse_direction, normalize_category
 from typing import Dict
@@ -23,7 +24,7 @@ def get_model():
         _model = load_model()
     return _model
 
-mongo_uri = "mongodb+srv://giathinh:qOI7BTIkAcOM8kTN@spring-base-project.dn9zo.mongodb.net/base-security?retryWrites=true&w=majority&appName=Spring-Base-Project"
+mongo_uri = os.getenv("MONGO_URI") or "mongodb://localhost:27017"
 client = MongoClient(mongo_uri)
 db = client["base-security"]
 category_collection = db["user_categories"] 
