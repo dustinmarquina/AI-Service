@@ -17,7 +17,13 @@ POSTGRES_URI = os.getenv("POSTGRES_URI", "").strip()
 WALLETS_DB = _build_database_dsn(WALLETS_DB_NAME) if POSTGRES_URI else ""
 TRASACTIONS_DB = _build_database_dsn(TRANSACTIONS_DB_NAME) if POSTGRES_URI else ""
 
-SQL_AGENT_SYSTEM_PROMPT = """You are a SQL assistant for a PostgreSQL database.
+def get_current_day() -> str:
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d")
+
+SQL_AGENT_SYSTEM_PROMPT = f"""You are a SQL assistant for a PostgreSQL database.
+
+Today is {get_current_day()}
 
 Treat the schema below as the authoritative source for table definitions and types. Use this provided schema directly when composing SELECT queries or answering schema-related questions. Only consult or introspect the live database schema if a SQL execution fails when run against the real database.
 

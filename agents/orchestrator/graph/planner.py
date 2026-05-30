@@ -11,7 +11,7 @@ from .tool_registry import describe_tools
 
 logger = logging.getLogger(__name__)
 
-Route = Literal["sql_agent", "chat", "execute", "finalize", "clarify"]
+Route = Literal["sql_agent", "execute", "finalize", "clarify"]
 
 # ---------------------------------------------------------------------------
 # Shared schema
@@ -67,9 +67,9 @@ Given the user message and conversation history, output ONLY valid JSON — no m
 
 ────────────────────────────────────────
 CASE 1 — pure conversation, read/query answer, or simple single-step write (no DB lookup needed):
-{{"route": "chat"|"sql_agent"|"finalize"|"clarify", "reason": "..."}}
+{{"route": "sql_agent"|"finalize"|"clarify", "reason": "..."}}
 
-CASE 2 — any action that requires reading the database (sql query OR tool that needs wallet_id/category_id):
+CASE 2 — financial advice or any action that requires reading the database (sql query OR tool that needs wallet_id/category_id):
 {{
     "route": "execute",
     "reason": "...",
@@ -87,10 +87,8 @@ CASE 2 — any action that requires reading the database (sql query OR tool that
 ────────────────────────────────────────
 
 Route rules:
-- "chat"     : user wants to CREATE a transaction or category and NO db lookup is needed or asks about financial advice on expenses (e.g. "nên chi tiêu thế nào", "tư vấn tài chính cá nhân")
-- "sql_agent": use this for READ/query/summarise/reporting requests (more specifically, "what was top 3 spending categories last month?")
 - "execute"  : use this when user wants to write but needs wallet_id, category_id, or any DB value first
-- "finalize" : pure conversation, no finance action
+- "execute"  : use this when user wants advice, wants to write, or needs wallet_id/category_id/any DB value first
 - "clarify"  : genuinely ambiguous
 - For finance requests that omit an owner phrase like "của tôi", assume they refer to the authenticated current user by default.
 - Do not ask the user to restate ownership for bare requests like "lần chi tiêu gần nhất", "tổng chi tuần vừa rồi", or "số dư hiện tại".
@@ -116,7 +114,13 @@ Write needing category:
 
 Create category then record transaction:
 [s0: get_user_id, s1: tool create_category, s2: sql fetch wallet, s3: tool create_transaction]
+
+Advice / financial-health query:
+[s0: get_user_id, s1: tool get_wallet_summary]
 """
+
+
+PLANNER_SYSTEM_PROMPT = _build_planner_system_prompt()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -128,6 +132,13 @@ _CLARIFY_RESPONSE = (
 )
 
 _PLACEHOLDER_RE = re.compile(r"\$(\w+)\.(\w+)")
+_ADVICE_RE = re.compile(
+    r"(tư vấn|tu van|advice|financial tips|financial advice|gợi ý|goi y|"
+    r"khuyên|khuyen|nên|nen|sức khỏe tài chính|suc khoe tai chinh)",
+    re.IGNORECASE,
+)
+
+_CREATE_CATEGORY_RE = re.compile(r"\b(tạo category|tao category|tạo danh mục|tao danh muc)\b", re.IGNORECASE)
 
 _llm = None
 
@@ -137,6 +148,93 @@ def _get_llm():
     if _llm is None:
         _llm = get_classifier_llm()
     return _llm
+
+
+def _is_advice_request(text: str) -> bool:
+    normalized = " ".join(str(text or "").strip().lower().split())
+    return bool(normalized and _ADVICE_RE.search(normalized))
+
+
+def _build_advice_execute_plan() -> dict:
+    return {
+        "route": "execute",
+        "reason": "advice merged into execute",
+        "steps": [
+            GET_USER_ID_STEP,
+            {
+                "id": "s1",
+                "type": "tool",
+                "name": "get_wallet_summary",
+                "args": {},
+            },
+        ],
+    }
+
+
+def _build_create_category_execute_plan(category_name: str) -> dict:
+    name = " ".join(str(category_name or "").strip().split())
+    if not name:
+        return {
+            "route": "clarify",
+            "reason": "missing category name",
+        }
+
+    return {
+        "route": "execute",
+        "reason": "category creation merged into execute",
+        "steps": [
+            GET_USER_ID_STEP,
+            {
+                "id": "s1",
+                "type": "tool",
+                "name": "create_category",
+                "args": {"name": name},
+            },
+        ],
+    }
+
+
+def _extract_category_name_from_history(messages: list) -> str:
+    human_messages = [
+        m for m in messages
+        if isinstance(m, HumanMessage)
+        and str(getattr(m, "content", "")).strip()
+    ]
+    latest_text = " ".join(str(human_messages[-1].content).strip().lower().split())
+    if _CREATE_CATEGORY_RE.search(latest_text):
+        remainder = _CREATE_CATEGORY_RE.sub("", str(human_messages[-1].content), count=1).strip(" ,.:;-_")
+        if remainder:
+            return " ".join(remainder.split())
+
+    if len(human_messages) < 2:
+        return ""
+
+    if not _CREATE_CATEGORY_RE.search(latest_text):
+        return ""
+
+    for prior in reversed(human_messages[:-1]):
+        candidate = " ".join(str(prior.content).strip().split())
+        candidate_lower = candidate.lower()
+        if not candidate or _CREATE_CATEGORY_RE.search(candidate_lower):
+            continue
+        if len(candidate) < 2:
+            continue
+        if candidate_lower in {"ok", "oke", "cảm ơn", "cam on", "thanks", "thank you"}:
+            continue
+        return candidate
+
+    return ""
+
+
+def _build_category_clarify_response(messages: list) -> str:
+    category_name = _extract_category_name_from_history(messages)
+    if category_name:
+        return (
+            f"Mình sẽ tạo category '{category_name}'. "
+            "Nếu bạn muốn, hãy gửi thêm icon hoặc hạn mức chi tiêu."
+        )
+
+    return "Bạn muốn tạo category tên gì?"
 
 
 def _ensure_get_user_id_first(steps: list[dict]) -> list[dict]:
@@ -216,14 +314,20 @@ def _validate_execute_steps(steps: list[dict]) -> tuple[list[dict], bool]:
     return all_steps, True
 
 
-def _parse_planner_output(text: str) -> dict:
+def _parse_planner_output(text: str, latest_human_text: str = "") -> dict:
     try:
         clean = re.sub(r"```[a-z]*", "", text).strip().strip("`")
         data = json.loads(clean)
         route = data.get("route", "clarify")
-        if route not in ("chat", "sql_agent", "execute", "finalize", "clarify"):
+        if route not in ("sql_agent", "execute", "finalize", "clarify"):
             logger.warning("planner: unknown route '%s'", route)
             return {"route": "clarify", "reason": "unknown route"}
+
+        if route == "chat":
+            return _build_advice_execute_plan() if _is_advice_request(latest_human_text) else {
+                "route": "clarify",
+                "reason": "chat removed from planner",
+            }
 
         if route == "execute":
             steps, is_valid = _validate_execute_steps(data.get("steps", []))
@@ -266,6 +370,9 @@ def _fallback_route(messages: list) -> dict:
                 },
             ],
         }
+
+    if _is_advice_request(normalized):
+        return _build_advice_execute_plan()
 
     if any(m in normalized for m in query_markers):
         return {
@@ -319,10 +426,18 @@ async def planner_node(state: State) -> dict:
     try:
         response = await llm.ainvoke([SystemMessage(content=_build_planner_system_prompt())] + history)
         raw = response.content if hasattr(response, "content") else str(response)
-        result = _parse_planner_output(raw)
+        latest_human_text = str(next((m.content for m in reversed(history) if isinstance(m, HumanMessage)), ""))
+        result = _parse_planner_output(raw, latest_human_text)
     except Exception as exc:
         logger.warning("planner: LLM failed, fallback. error=%s", exc)
         result = _fallback_route(history)
+
+    if result.get("route") == "clarify":
+        latest_human_text = str(next((m.content for m in reversed(history) if isinstance(m, HumanMessage)), ""))
+        if _CREATE_CATEGORY_RE.search(" ".join(latest_human_text.strip().lower().split())):
+            category_name = _extract_category_name_from_history(history)
+            if category_name:
+                result = _build_create_category_execute_plan(category_name)
 
     if result.get("reason") in {"parse error", "invalid execute steps"}:
         result = _fallback_route(history)
@@ -343,11 +458,18 @@ async def planner_node(state: State) -> dict:
 
 def route_after_planner(state: State) -> Route:
     route = state.get("route", "clarify")
-    if route not in ("chat", "sql_agent", "execute", "finalize", "clarify"):
+    if route not in ("sql_agent", "execute", "finalize", "clarify"):
         logger.warning("route_after_planner: unexpected '%s', clarifying", route)
         return "clarify"
     return route
 
 
 async def clarify_node(state: State) -> dict:
+    messages = list(state.get("messages", []))
+    latest_human = next((m for m in reversed(messages) if isinstance(m, HumanMessage)), None)
+    latest_text = str(getattr(latest_human, "content", "")).strip().lower()
+
+    if _CREATE_CATEGORY_RE.search(" ".join(latest_text.split())):
+        return {"messages": [AIMessage(content=_build_category_clarify_response(messages))]}
+
     return {"messages": [AIMessage(content=_CLARIFY_RESPONSE)]}

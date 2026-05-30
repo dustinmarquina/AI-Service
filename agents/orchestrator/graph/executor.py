@@ -40,6 +40,9 @@ def _resolve_args(args: dict, step_results: dict[str, Any]) -> dict:
     return {k: _resolve_value(v, step_results) for k, v in args.items()}
 
 
+_RESERVED_RUNTIME_KEYS = {"token", "user_id"}
+
+
 # ---------------------------------------------------------------------------
 # SQL result extraction
 # ---------------------------------------------------------------------------
@@ -195,7 +198,11 @@ async def executor_node(state: State) -> dict:
         write_to_state = current.get("write_to_state")  # e.g. "user_id"
 
         try:
-            resolved_args = _resolve_args(raw_args, step_results)
+            resolved_args = {
+                k: _resolve_value(v, step_results)
+                for k, v in raw_args.items()
+                if k not in _RESERVED_RUNTIME_KEYS
+            }
         except ValueError as exc:
             logger.error("executor: placeholder resolution failed: %s", exc)
             return {
@@ -208,10 +215,10 @@ async def executor_node(state: State) -> dict:
         runtime_token = str(state.get("token") or os.getenv("TRANSACTION_API_TOKEN", "")).strip()
         runtime_user_id = str(state.get("user_id") or os.getenv("TRANSACTION_USER_ID", "")).strip()
         if runtime_token:
-            resolved_args.setdefault("token", runtime_token)
+            resolved_args["token"] = runtime_token
         # Only inject user_id for non-bootstrap tools (get_user_id resolves it)
         if runtime_user_id and tool_name != "get_user_id":
-            resolved_args.setdefault("user_id", runtime_user_id)
+            resolved_args["user_id"] = runtime_user_id
 
         logger.info("executor: calling tool '%s' args=%s", tool_name, {
             k: (v[:8] + "...") if k == "token" and isinstance(v, str) else v
@@ -294,7 +301,24 @@ def build_execution_summary(state: State) -> AIMessage:
                 lines.append(f"✅ Đã tạo danh mục **{name}**.")
             else:
                 lines.append(f"❌ Tạo danh mục thất bại: {result.get('message', 'lỗi không xác định')}")
-
+        elif tool_name == "get_wallet_summary":
+            status = result.get("status", "unknown")
+            if status == "success":
+                wallet_summary = result.get("wallet_summary", {})
+                health_score = result.get("financial_health_score", "")
+                total_balance = ""
+                if isinstance(wallet_summary, dict):
+                    total_balance = wallet_summary.get("totalBalance", "")
+                if total_balance != "":
+                    lines.append(
+                        f"✅ Đã lấy thông tin ví của bạn. Tổng số dư là **{total_balance:,} ₫** và điểm sức khỏe tài chính là **{health_score}**."
+                    )
+                else:
+                    lines.append(
+                        f"✅ Đã lấy thông tin ví của bạn và điểm sức khỏe tài chính là **{health_score}**."
+                    )
+            else:
+                lines.append(f"❌ Lấy thông tin ví thất bại: {result.get('message', 'lỗi không xác định')}")
         else:
             lines.append(f"✅ Bước {step['id']} hoàn thành.")
 

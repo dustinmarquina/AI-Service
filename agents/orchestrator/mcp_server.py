@@ -164,6 +164,7 @@ def _auth_error_message(status_code: int) -> str:
 @mcp.tool()
 async def get_wallet_summary(token: str = "", user_id: str = "") -> Dict[str, Any]:
     """Get a summary of the user's wallets and balances used to give advice on their financial health and spending habits based on their current financial situation.
+    Mention the user's financial health score and provide insights on their spending habits based on the wallet summary. For example, if the user has a low financial health score, you can suggest ways to improve it, such as reducing expenses or increasing income. If the user has a high balance in one wallet but low balances in others, you can suggest redistributing funds to optimize their financial situation.
 
     Parameters:
     - token (str): bearer token for authentication
@@ -245,7 +246,7 @@ async def create_transaction(
     )
 
     payload = {
-        "userId": "af1eb20b-54e5-4910-b974-60151185e48f",
+        "userId": resolved_user_id,
         "amount": parsed_amount if parsed_amount is not None else amount,
         "description": description,
         "type": "EXPENSE",
@@ -345,7 +346,7 @@ async def create_category(
     )
 
     payload = {
-        "userId": "af1eb20b-54e5-4910-b974-60151185e48f",
+        "userId": resolved_user_id,
         "name": name,
         "icon": icon,
         "budgetLimit": parsed_limit if parsed_limit is not None else budget_limit,

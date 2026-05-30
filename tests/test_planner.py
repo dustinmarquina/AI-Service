@@ -104,6 +104,30 @@ class PlannerFallbackTests(unittest.TestCase):
     def test_planner_prompt_treats_bare_finance_queries_as_current_user(self):
         self.assertIn("authenticated current user", PLANNER_MODULE.PLANNER_SYSTEM_PROMPT)
 
+    def test_routes_bare_create_category_to_execute_when_history_has_name(self):
+        PLANNER_MODULE._get_llm = lambda: _RaisingLLM()
+
+        result = asyncio.run(
+            planner_node(
+                {
+                    "messages": [
+                        HumanMessage(content="ăn sáng"),
+                        HumanMessage(content="tạo category"),
+                    ]
+                }
+            )
+        )
+
+        self.assertEqual(result["route"], "execute")
+        self.assertEqual(result["steps"][1]["name"], "create_category")
+        self.assertEqual(result["steps"][1]["args"]["name"], "ăn sáng")
+
+    def test_clarify_asks_for_category_name_when_history_is_missing(self):
+        message = PLANNER_MODULE.clarify_node({"messages": [HumanMessage(content="tạo category")]})
+        result = asyncio.run(message)
+
+        self.assertIn("category tên gì", result["messages"][0].content)
+
 
 if __name__ == "__main__":
     unittest.main()

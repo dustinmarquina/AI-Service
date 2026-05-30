@@ -1,8 +1,0 @@
-FROM ollama/ollama:latest
-
-# Pull the model at build time (optional but recommended)
-RUN ollama pull llama3.1
-
-EXPOSE 11434
-
-CMD ["ollama", "serve"]

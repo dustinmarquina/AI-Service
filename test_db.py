@@ -75,9 +75,9 @@ def test_connection():
 
         print(f"Dialect: {db.dialect}")
         print(f"Available tables: {db.get_usable_table_names()}")
-        print(f'Table info: {db.get_table_info(["wallets"])}')
+        print(f'Table info: {db.get_table_info(["transactions"])}')
         #execute a simple query
-        result = db.run("SELECT id, name FROM wallets WHERE user_id = 'af1eb20b-54e5-4910-b974-60151185e48f';")
+        result = db.run("SELECT id, name FROM transactions WHERE user_id = 'af1eb20b-54e5-4910-b974-60151185e48f';")
 
         print(f"Query Result: {result}")
 
