@@ -87,7 +87,11 @@ Open:
 
 ## Demo
 
-Add screenshots or GIFs of the system here.
+<img width="323" height="698" alt="image" src="https://github.com/user-attachments/assets/fb52252e-6d60-4cd7-b45c-37e32e2c5bab" />
+
+<img width="293" height="401" alt="att Rr_46eqw41-BwtqoPVXUW9TXZEvbAg-xKJ1a1FuBkoI" src="https://github.com/user-attachments/assets/d3820612-6295-448d-b12d-d3c6ad4a261f" />
+
+
 
 Suggested layout:
 
