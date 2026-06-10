@@ -24,10 +24,15 @@ def get_model():
         _model = load_model()
     return _model
 
-mongo_uri = os.getenv("MONGO_URI") or "mongodb://localhost:27017"
+mongo_uri = (
+    os.getenv("MONGO_URL")
+    or os.getenv("mongo_url")
+    or os.getenv("MONGO_URI")
+    or "mongodb://localhost:27017"
+)
 client = MongoClient(mongo_uri)
-db = client["base-security"]
-category_collection = db["user_categories"] 
+db = client[os.getenv("MONGO_DB_NAME", "budget-tracker")]
+category_collection = db["categories"] 
 
 labels = [
   "Grocery","Food & Drinks","Transport"

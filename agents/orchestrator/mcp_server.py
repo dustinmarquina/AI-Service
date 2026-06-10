@@ -3,10 +3,12 @@ import re
 import logging
 import json
 import base64
+import uuid
 from typing import Any, Dict, Optional
 from contextvars import ContextVar
-from datetime import datetime
+from datetime import UTC, datetime
 
+from .candidate_binding import select_candidate_binding
 from .graph.state import State
 import httpx
 from dotenv import load_dotenv
@@ -32,6 +34,9 @@ TRANSACTION_API_URL: str = os.getenv("TRANSACTION_API_URL", "")
 CATEGORY_API_URL: str = os.getenv("CATEGORY_API_URL", "")
 DEFAULT_USER_ID: str = os.getenv("TRANSACTION_USER_ID", "")
 REPORT_API_URL: str = os.getenv("REPORT_API_URL", "")
+MONGO_DB_NAME: str = os.getenv("MONGO_DB_NAME", "budget-tracker").strip() or "budget-tracker"
+_mongo_client: Any | None = None
+_candidate_binding_llm: Any | None = None
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -78,6 +83,37 @@ def _resolve_user_id(tool_user_id: str) -> str:
         or current_user_id.get().strip()
         or DEFAULT_USER_ID
     )
+
+
+def _get_mongo_uri() -> str:
+    return (
+        os.getenv("MONGO_URL", "").strip()
+        or os.getenv("mongo_url", "").strip()
+        or os.getenv("MONGO_URI", "").strip()
+    )
+
+
+def _get_mongo_client():
+    global _mongo_client
+    if _mongo_client is None:
+        mongo_uri = _get_mongo_uri()
+        if not mongo_uri:
+            raise RuntimeError("MONGO_URL/mongo_url/MONGO_URI is not set")
+        from pymongo import MongoClient
+        _mongo_client = MongoClient(mongo_uri)
+    return _mongo_client
+
+
+def _get_candidate_binding_llm():
+    global _candidate_binding_llm
+    if _candidate_binding_llm is None:
+        from .llm import get_classifier_llm
+        _candidate_binding_llm = get_classifier_llm()
+    return _candidate_binding_llm
+
+
+def _get_collection(name: str):
+    return _get_mongo_client()[MONGO_DB_NAME][name]
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +192,76 @@ def _auth_error_message(status_code: int) -> str:
     return f"Backend returned an error (HTTP {status_code})."
 
 
+def _normalize_document_id(document: dict[str, Any], field_name: str) -> dict[str, Any]:
+    normalized = dict(document)
+    if "_id" in normalized and field_name not in normalized:
+        normalized[field_name] = str(normalized["_id"])
+    normalized.pop("_id", None)
+    return normalized
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    try:
+        from bson import ObjectId
+        if isinstance(value, ObjectId):
+            return str(value)
+    except Exception:
+        pass
+    return value
+
+
+def _wallet_candidates_for_user(user_id: str) -> list[dict[str, Any]]:
+    wallets = []
+    for wallet in _get_collection("wallets").find({"userId": user_id}):
+        if wallet.get("active") is False:
+            continue
+        wallet_id = str(wallet.get("walletId") or wallet.get("wallet_id") or wallet.get("_id") or "")
+        if not wallet_id:
+            continue
+        wallets.append(
+            {
+                "id": wallet_id,
+                "walletId": wallet_id,
+                "name": wallet.get("name") or wallet.get("label") or wallet_id,
+                "balance": wallet.get("balance"),
+                "currency": wallet.get("currency"),
+            }
+        )
+    return wallets
+
+async def _select_wallet_id_with_llm(
+    wallets: list[dict[str, Any]],
+    *,
+    wallet_name: str = "",
+    text_hint: str = "",
+    description: str = "",
+) -> str | None:
+    user_text = wallet_name.strip() or text_hint.strip() or description.strip()
+    if not user_text:
+        return None
+
+    decision = await select_candidate_binding(
+        _get_candidate_binding_llm(),
+        user_text=user_text,
+        current_context={
+            "name": "create_transaction",
+            "description": "Resolve wallet_id for a transaction before writing it.",
+        },
+        arg_name="wallet_id",
+        rows=wallets,
+    )
+    if not decision or decision.get("route") != "execute":
+        return None
+    value = decision.get("value")
+    return str(value) if value else None
+
+
 # ---------------------------------------------------------------------------
 # MCP server & tools
 # ---------------------------------------------------------------------------
@@ -183,36 +289,110 @@ async def get_wallet_summary(token: str = "", user_id: str = "") -> Dict[str, An
         "totalBalance": -506874168.00
     }
     """
-    # `user_id` is accepted for executor compatibility; the token remains the primary auth input.
+    resolved_user_id = _resolve_user_id(user_id)
+    if not resolved_user_id:
+        return _error_response(
+            "Missing user_id. Set TRANSACTION_USER_ID or pass user_id in tool args."
+        )
+
     try:
-        wallet_summary = await _api_call(
-            "GET", f"{REPORT_API_URL}/wallet-summary",
-            bearer=_resolve_token(token),
-        )
-        month = datetime.now().month
-        year = datetime.now().year
-        date = f"{year}-{month:02d}" 
-        financial_health = await _api_call(
-            "GET", f"{REPORT_API_URL}/financial-health-score?month={date}",
-            bearer=_resolve_token(token),
-        )
+        wallets_cursor = _get_collection("wallets").find({"userId": resolved_user_id})
+        wallets = [
+            _normalize_document_id(wallet, "walletId")
+            for wallet in wallets_cursor
+        ]
+        total_balance = 0
+        for wallet in wallets:
+            try:
+                total_balance += float(wallet.get("balance", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+
         return {
             "status": "success",
-            "wallet_summary": wallet_summary.get("data", {}),
-            "financial_health_score": financial_health.get("data", {}).get("score"),
+            "wallet_summary": _json_safe({
+                "wallets": wallets,
+                "totalBalance": total_balance,
+            }),
+            "financial_health_score": None,
         }
-    except APIError as exc:
-        return _error_response(_auth_error_message(exc.status_code), status_code=exc.status_code, data=exc.data)
-    except httpx.HTTPError as exc:
-        return _error_response(f"Request failed: {exc}")
+    except Exception as exc:
+        return _error_response(f"Mongo request failed: {exc}")
+
+@mcp.tool()
+async def create_wallet(
+    name: str,
+    balance: str = "0",
+    currency: str = "VND",
+    token: str = "",
+    user_id: str = "",
+) -> Dict[str, Any]:
+    """Create a manual wallet.
+
+    Parameters:
+    - name      (str): wallet name, e.g. "Cash", "MB Bank"
+    - balance   (str, optional): starting balance, supports shorthand like "50k"
+    - currency  (str, optional): wallet currency, defaults to "VND"
+    - token     (str, optional): bearer token
+    - user_id   (str, optional): user UUID
+    """
+    name = name.strip()
+    if not name:
+        return _error_response("Wallet name is required.")
+
+    resolved_user_id = _resolve_user_id(user_id)
+    if not resolved_user_id:
+        return _error_response(
+            "Missing user_id. Set TRANSACTION_USER_ID or pass user_id in tool args."
+        )
+
+    parsed_balance = _parse_amount(balance)
+    logger.info(
+        "create_wallet: name=%s balance=%s→%s currency=%s user_id=%s",
+        name, balance, parsed_balance, currency, resolved_user_id,
+    )
+
+    payload = {
+        "walletId": str(uuid.uuid4()),
+        "userId": resolved_user_id,
+        "name": name,
+        "balance": parsed_balance if parsed_balance is not None else 0,
+        "currency": (currency or "VND").strip().upper() or "VND",
+        "walletType": "MANUAL",
+        "active": True,
+        "createdAt": datetime.now(UTC),
+    }
+
+    try:
+        existing = _get_collection("wallets").find_one(
+            {"userId": resolved_user_id, "name": name}
+        )
+        if existing:
+            return _error_response("Wallet already exists.")
+
+        result = _get_collection("wallets").insert_one(payload)
+        created = dict(payload)
+        created["id"] = str(result.inserted_id)
+        return {
+            "status": "success",
+            "status_code": 201,
+            "data": _json_safe(created),
+        }
+    except Exception as exc:
+        return _error_response(f"Mongo request failed: {exc}")
+
 
 @mcp.tool()
 async def create_transaction(
     amount: str,
     description: str,
     wallet_id: str = "",
+    wallet_name: str = "",
+    request_text: str = "",
     category_name: str = "",
     category_id: str = "",
+    transaction_date: str = "",
+    image_url: str = "",
     token: str = "",
     user_id: str = "",
 ) -> Dict[str, Any]:
@@ -222,6 +402,8 @@ async def create_transaction(
     - amount      (str): transaction amount – supports shorthand like "50k", "20,000"
     - description (str): what the money was spent on, e.g. "ăn sáng", "cà phê"
     - wallet_id   (str, optional): wallet UUID to record the expense against
+    - wallet_name (str, optional): exact wallet name to resolve before prompting
+    - request_text (str, optional): raw user utterance used for wallet-name disambiguation
     - category_name (str, optional): category label for backend auto-matching
     - category_id (str, optional): category UUID when already resolved
     - token       (str, optional): bearer token (falls back to request context / env)
@@ -245,31 +427,62 @@ async def create_transaction(
         amount, parsed_amount, description, resolved_user_id,
     )
 
+    now = datetime.now(UTC)
+    timestamp = transaction_date.strip() or now.isoformat()
     payload = {
-        "userId": resolved_user_id,
+        "id": str(uuid.uuid4()),
         "amount": parsed_amount if parsed_amount is not None else amount,
-        "description": description,
         "type": "EXPENSE",
+        "category_id": str(category_id).strip() or None,
+        "category_name": str(category_name).strip() or None,
+        "description": description,
+        "wallet_id": None,
+        "user_id": resolved_user_id,
+        "transaction_date": timestamp,
+        "created_at": now,
+        "updated_at": now,
+        "image_url": image_url.strip() or None,
     }
     if str(wallet_id).strip():
-        payload["walletId"] = str(wallet_id).strip()
-    if str(category_name).strip():
-        payload["categoryName"] = str(category_name).strip()
-    if str(category_id).strip():
-        payload["categoryId"] = str(category_id).strip()
-    logger.info("create_transaction: token=%s", _resolve_token(token))
+        payload["wallet_id"] = str(wallet_id).strip()
     try:
-        return await _api_call(
-            "POST", TRANSACTION_API_URL,
-            bearer=_resolve_token(token),
-            payload=payload,
-        )
-    #logging token
-    
-    except APIError as exc:
-        return _error_response(_auth_error_message(exc.status_code), status_code=exc.status_code, data=exc.data)
-    except httpx.HTTPError as exc:
-        return _error_response(f"Request failed: {exc}")
+        if payload["wallet_id"] and str(payload["wallet_id"]).startswith("$"):
+            return _error_response("wallet_id placeholder was not resolved before tool execution.")
+
+        if not payload["wallet_id"]:
+            wallets = _wallet_candidates_for_user(resolved_user_id)
+            if not wallets:
+                return _error_response("No wallet found for this user.")
+            if len(wallets) == 1:
+                payload["wallet_id"] = wallets[0]["walletId"]
+            else:
+                resolved_wallet_id = await _select_wallet_id_with_llm(
+                    wallets,
+                    wallet_name=wallet_name,
+                    text_hint=request_text or description,
+                    description=description,
+                )
+                if resolved_wallet_id:
+                    payload["wallet_id"] = resolved_wallet_id
+                else:
+                    return {
+                        "status": "needs_input",
+                        "prompt": "Please choose which wallet to use for this transaction:",
+                        "selection_field": "wallet_id",
+                        "value_field": "walletId",
+                        "candidates": wallets,
+                    }
+
+        result = _get_collection("transactions").insert_one(payload)
+        created = dict(payload)
+        created.setdefault("mongo_id", str(result.inserted_id))
+        return {
+            "status": "success",
+            "status_code": 201,
+            "data": _json_safe(created),
+        }
+    except Exception as exc:
+        return _error_response(f"Mongo request failed: {exc}")
 
 
 def extract_user_id_from_token(token: str) -> Optional[str]:
@@ -354,15 +567,24 @@ async def create_category(
     }
 
     try:
-        return await _api_call(
-            "POST", CATEGORY_API_URL,
-            bearer=_resolve_token(token),
-            payload=payload,
+        existing = _get_collection("categories").find_one(
+            {"userId": resolved_user_id, "name": name}
         )
-    except APIError as exc:
-        return _error_response(_auth_error_message(exc.status_code), status_code=exc.status_code, data=exc.data)
-    except httpx.HTTPError as exc:
-        return _error_response(f"Request failed: {exc}")
+        if existing:
+            return _error_response("Category already exists.")
+
+        payload["categoryId"] = str(uuid.uuid4())
+        payload["createdAt"] = datetime.now(UTC)
+        result = _get_collection("categories").insert_one(payload)
+        created = dict(payload)
+        created["id"] = str(result.inserted_id)
+        return {
+            "status": "success",
+            "status_code": 201,
+            "data": _json_safe(created),
+        }
+    except Exception as exc:
+        return _error_response(f"Mongo request failed: {exc}")
 
 
 if __name__ == "__main__":

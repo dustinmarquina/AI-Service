@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import os
 import sys
@@ -37,52 +38,56 @@ DB_MODULE = _load_module(
 )
 
 
+class _FakeCollection:
+    def __init__(self, docs):
+        self.docs = list(docs)
+
+    def find(self, query):
+        results = []
+        for doc in self.docs:
+            if all(doc.get(key) == value for key, value in query.items()):
+                results.append(dict(doc))
+        return results
+
+
 class GraphDbTests(unittest.TestCase):
-    def test_build_database_dsn_adds_database_to_server_base_uri(self):
-        with patch.dict(
-            os.environ,
-            {"POSTGRES_URI": "postgresql://user:pass@db.example.com"},
-            clear=False,
-        ):
-            dsn = DB_MODULE._build_database_dsn("wallet_db")
-
-        self.assertEqual(
-            dsn,
-            "postgresql://user:pass@db.example.com/wallet_db",
+    def test_execute_mongo_query_filters_wallets_by_name_and_user(self):
+        wallets = _FakeCollection(
+            [
+                {"walletId": "wallet-1", "userId": "user-123", "name": "du học", "active": True, "balance": 1000, "currency": "VND"},
+                {"walletId": "wallet-2", "userId": "user-123", "name": "MB Bank", "active": True, "balance": 2000, "currency": "VND"},
+                {"walletId": "wallet-3", "userId": "other-user", "name": "MB Bank", "active": True, "balance": 3000, "currency": "VND"},
+            ]
         )
 
-    def test_build_database_dsn_replaces_existing_database_path(self):
-        with patch.dict(
-            os.environ,
-            {"POSTGRES_URI": "postgresql://user:pass@db.example.com/postgres"},
-            clear=False,
-        ):
-            dsn = DB_MODULE._build_database_dsn("transaction_db")
-
-        self.assertEqual(
-            dsn,
-            "postgresql://user:pass@db.example.com/transaction_db",
-        )
-
-    def test_choose_database_for_wallets_query(self):
-        database_name = DB_MODULE._choose_database_name_for_sql(
-            "SELECT id, name FROM wallets WHERE active = true"
-        )
-
-        self.assertEqual(database_name, "wallet_db")
-
-    def test_choose_database_for_categories_query(self):
-        database_name = DB_MODULE._choose_database_name_for_sql(
-            "SELECT id FROM categories WHERE user_id = 'abc'"
-        )
-
-        self.assertEqual(database_name, "transaction_db")
-
-    def test_choose_database_for_cross_database_query_raises(self):
-        with self.assertRaises(ValueError):
-            DB_MODULE._choose_database_name_for_sql(
-                "SELECT * FROM wallets JOIN transactions ON wallets.id = transactions.wallet_id"
+        with patch.object(DB_MODULE, "_get_mongo_collection", return_value=wallets):
+            rows = asyncio.run(
+                DB_MODULE._execute_mongo_query(
+                    "SELECT id FROM wallets WHERE name = 'MB Bank' AND user_id = 'user-123' AND active = true LIMIT 1"
+                )
             )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "wallet-2")
+
+    def test_execute_mongo_query_honors_order_by_before_limit(self):
+        wallets = _FakeCollection(
+            [
+                {"walletId": "wallet-1", "userId": "user-123", "name": "du học", "active": True, "balance": 400000000, "currency": "VND"},
+                {"walletId": "wallet-2", "userId": "user-123", "name": "MB Bank", "active": True, "balance": 50000000, "currency": "VND"},
+                {"walletId": "wallet-3", "userId": "user-123", "name": "Cash", "active": True, "balance": 250000, "currency": "VND"},
+            ]
+        )
+
+        with patch.object(DB_MODULE, "_get_mongo_collection", return_value=wallets):
+            rows = asyncio.run(
+                DB_MODULE._execute_mongo_query(
+                    "SELECT id FROM wallets WHERE user_id = 'user-123' ORDER BY balance ASC LIMIT 1"
+                )
+            )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "wallet-3")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 import json
 import base64
+import uuid
 
 from fastapi import Depends, APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -98,11 +99,19 @@ async def chat_message(
         user_id = _extract_user_id_from_token(token)
         print(f"Received chat message: {request_body.message}, token: {token}")
 
+        # Use a per-request/session thread id. Prefer a client-provided header
+        # `X-Session-Id` so clients can resume, otherwise generate a UUID.
+        session_id = (
+            request.headers.get("X-Session-Id")
+            or request.headers.get("x-session-id")
+            or str(uuid.uuid4())
+        )
+
         payload = {
             "messages": [HumanMessage(content=request_body.message)],
             "user_id": user_id,
             "token": token,
-            "session_id": "<SESSION_ID>",  # fix the session_id for now
+            "session_id": session_id,
         }
         config = {
             "configurable": {
@@ -111,8 +120,13 @@ async def chat_message(
         }
 
         snapshot = await graph.aget_state(config)
-        has_pending_interrupt = bool(getattr(snapshot, "interrupts", ()))
-        graph_input = Command(resume=request_body.message) if has_pending_interrupt else payload
+        interrupts = getattr(snapshot, "interrupts", ()) or ()
+        if interrupts:
+            # Prefer resuming by explicit interrupt id to avoid ambiguity
+            iid = getattr(interrupts[0], "id", None)
+            graph_input = Command(resume={iid: request_body.message}) if iid else Command(resume=request_body.message)
+        else:
+            graph_input = payload
 
         async def event_stream():
             last_emitted = None

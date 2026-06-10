@@ -6,16 +6,13 @@ from typing import Literal
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from agents.orchestrator.llm import get_classifier_llm
+from .config import DEFAULT_CLARIFY_RESPONSE
 from .state import State
 from .tool_registry import describe_tools
 
 logger = logging.getLogger(__name__)
 
-Route = Literal["sql_agent", "execute", "finalize", "clarify"]
-
-# ---------------------------------------------------------------------------
-# Shared schema
-# ---------------------------------------------------------------------------
+Route = Literal["execute", "finalize", "clarify"]
 
 DB_SCHEMA = """
 TABLE transactions (
@@ -37,10 +34,6 @@ TABLE categories (
 )
 """.strip()
 
-# ---------------------------------------------------------------------------
-# Bootstrap step constant
-# ---------------------------------------------------------------------------
-
 GET_USER_ID_STEP = {
     "id": "s0",
     "type": "tool",
@@ -49,97 +42,12 @@ GET_USER_ID_STEP = {
     "write_to_state": "user_id",
 }
 
-# ---------------------------------------------------------------------------
-# Planner prompt
-# ---------------------------------------------------------------------------
-
-def _build_planner_system_prompt() -> str:
-        tools_schema = describe_tools()
-        return f"""You are a planner for a Vietnamese personal finance assistant.
-
-Database schema:
-{DB_SCHEMA}
-
-Available tools:
-{tools_schema}
-
-Given the user message and conversation history, output ONLY valid JSON — no markdown.
-
-────────────────────────────────────────
-CASE 1 — pure conversation, read/query answer, or simple single-step write (no DB lookup needed):
-{{"route": "sql_agent"|"finalize"|"clarify", "reason": "..."}}
-
-CASE 2 — financial advice or any action that requires reading the database (sql query OR tool that needs wallet_id/category_id):
-{{
-    "route": "execute",
-    "reason": "...",
-    "steps": [
-        {{
-            "id": "s0",
-            "type": "tool",
-            "name": "get_user_id",
-            "args": {{}},
-            "write_to_state": "user_id"
-        }},
-        ... your steps here (sql or tool) ...
-    ]
-}}
-────────────────────────────────────────
-
-Route rules:
-- "execute"  : use this when user wants to write but needs wallet_id, category_id, or any DB value first
-- "execute"  : use this when user wants advice, wants to write, or needs wallet_id/category_id/any DB value first
-- "clarify"  : genuinely ambiguous
-- For finance requests that omit an owner phrase like "của tôi", assume they refer to the authenticated current user by default.
-- Do not ask the user to restate ownership for bare requests like "lần chi tiêu gần nhất", "tổng chi tuần vừa rồi", or "số dư hiện tại".
-
-Step rules:
-- ALWAYS start steps with id="s0" get_user_id as the FIRST step.
-- After s0, use sql steps for DB reads and tool steps for writes.
-- CRITICAL: if a tool step uses a placeholder like "$s1.id", then a step with id="s1" MUST
-    exist earlier in the steps list. Never reference a step that isn't defined.
-- Placeholder "$stepId.field" resolves to that field from the step result.
-- Scope all SQL to the current user: WHERE user_id = :user_id
-
-Common execute patterns:
-
-Read query:
-[s0: get_user_id, s1: sql "SELECT SUM(amount) FROM transactions WHERE user_id = :user_id AND ..."]
-
-Write needing wallet:
-[s0: get_user_id, s1: sql "SELECT id, name FROM wallets WHERE user_id = :user_id AND active = true", s2: tool create_transaction with wallet_id="$s1.id"]
-
-Write needing category:
-[s0: get_user_id, s1: sql "SELECT id FROM categories WHERE user_id = :user_id AND name ILIKE '%name%'", s2: tool create_transaction with category_id="$s1.id"]
-
-Create category then record transaction:
-[s0: get_user_id, s1: tool create_category, s2: sql fetch wallet, s3: tool create_transaction]
-
-Advice / financial-health query:
-[s0: get_user_id, s1: tool get_wallet_summary]
-"""
-
-
-PLANNER_SYSTEM_PROMPT = _build_planner_system_prompt()
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-_CLARIFY_RESPONSE = (
-    "Mình chưa hiểu rõ ý bạn. "
-    "Bạn muốn ghi một khoản chi tiêu, xem báo cáo, hay cần gì khác?"
-)
-
-_PLACEHOLDER_RE = re.compile(r"\$(\w+)\.(\w+)")
-_ADVICE_RE = re.compile(
-    r"(tư vấn|tu van|advice|financial tips|financial advice|gợi ý|goi y|"
-    r"khuyên|khuyen|nên|nen|sức khỏe tài chính|suc khoe tai chinh)",
+_PLACEHOLDER_RE = re.compile(r"^\$(\w+)\.(\w+)$")
+_AMOUNT_TOKEN_RE = re.compile(
+    r"(?P<amount>\d+(?:[.,]\d+)?)\s*(?:k|ng[aà]n|ngh[iì]n|nghin|tr|tri[eê]u|m|vnd|vnđ|đ|d)\b|(?P<grouped>\d{1,3}(?:[.,]\d{3})+)\b",
     re.IGNORECASE,
 )
-
-_CREATE_CATEGORY_RE = re.compile(r"\b(tạo category|tao category|tạo danh mục|tao danh muc)\b", re.IGNORECASE)
-
+_WALLET_HINT_RE = re.compile(r"\b(?:v[aà]o\s+v[ií]|v[ií])\s+(.+)$", re.IGNORECASE)
 _llm = None
 
 
@@ -150,101 +58,54 @@ def _get_llm():
     return _llm
 
 
-def _is_advice_request(text: str) -> bool:
-    normalized = " ".join(str(text or "").strip().lower().split())
-    return bool(normalized and _ADVICE_RE.search(normalized))
+def _build_planner_system_prompt() -> str:
+    tools_schema = describe_tools()
+    return f"""You are a generic planner for a plan-and-execute agent.
 
+You can produce plans using two step types:
+- "tool": call an MCP tool by name with args
+- "sql": run a read-only SQL lookup using query_hint
 
-def _build_advice_execute_plan() -> dict:
-    return {
-        "route": "execute",
-        "reason": "advice merged into execute",
-        "steps": [
-            GET_USER_ID_STEP,
-            {
-                "id": "s1",
-                "type": "tool",
-                "name": "get_wallet_summary",
-                "args": {},
-            },
-        ],
-    }
+Available tools:
+{tools_schema}
 
+Available SQL data sources:
+{DB_SCHEMA}
 
-def _build_create_category_execute_plan(category_name: str) -> dict:
-    name = " ".join(str(category_name or "").strip().split())
-    if not name:
-        return {
-            "route": "clarify",
-            "reason": "missing category name",
-        }
+Return ONLY valid JSON with one of these shapes:
+{{"route":"execute","reason":"...","steps":[...]}}
+{{"route":"finalize","reason":"...","message":"..."}}
+{{"route":"clarify","reason":"...","message":"..."}}
 
-    return {
-        "route": "execute",
-        "reason": "category creation merged into execute",
-        "steps": [
-            GET_USER_ID_STEP,
-            {
-                "id": "s1",
-                "type": "tool",
-                "name": "create_category",
-                "args": {"name": name},
-            },
-        ],
-    }
-
-
-def _extract_category_name_from_history(messages: list) -> str:
-    human_messages = [
-        m for m in messages
-        if isinstance(m, HumanMessage)
-        and str(getattr(m, "content", "")).strip()
-    ]
-    latest_text = " ".join(str(human_messages[-1].content).strip().lower().split())
-    if _CREATE_CATEGORY_RE.search(latest_text):
-        remainder = _CREATE_CATEGORY_RE.sub("", str(human_messages[-1].content), count=1).strip(" ,.:;-_")
-        if remainder:
-            return " ".join(remainder.split())
-
-    if len(human_messages) < 2:
-        return ""
-
-    if not _CREATE_CATEGORY_RE.search(latest_text):
-        return ""
-
-    for prior in reversed(human_messages[:-1]):
-        candidate = " ".join(str(prior.content).strip().split())
-        candidate_lower = candidate.lower()
-        if not candidate or _CREATE_CATEGORY_RE.search(candidate_lower):
-            continue
-        if len(candidate) < 2:
-            continue
-        if candidate_lower in {"ok", "oke", "cảm ơn", "cam on", "thanks", "thank you"}:
-            continue
-        return candidate
-
-    return ""
-
-
-def _build_category_clarify_response(messages: list) -> str:
-    category_name = _extract_category_name_from_history(messages)
-    if category_name:
-        return (
-            f"Mình sẽ tạo category '{category_name}'. "
-            "Nếu bạn muốn, hãy gửi thêm icon hoặc hạn mức chi tiêu."
-        )
-
-    return "Bạn muốn tạo category tên gì?"
+Planning rules:
+- Use "execute" when the request needs one or more tool or sql steps.
+- Use "finalize" only when you can answer directly without executing any step.
+- Use "clarify" when key information is missing or the request is ambiguous.
+- Do not use "clarify" just because an optional tool argument is missing.
+- If a tool's required fields can be satisfied, prefer "execute" and omit optional fields that can be resolved later by SQL lookup, tool-side matching, or execution-time user choice.
+- If ambiguity can be deferred to a later selection step or a tool can request follow-up input during execution, prefer "execute" over "clarify".
+- SQL steps must be SELECT-only and use fields:
+  {{"id":"sN","type":"sql","reasoning":"...","description":"...","query_hint":"SELECT ...","selection_mode":"none|required"}}
+- Tool steps must use fields:
+  {{"id":"sN","type":"tool","name":"tool_name","reasoning":"...","args":{{...}}}}
+- Each step must include a "reasoning" field explaining why this step is necessary given the tool requirements and what is already known.
+- Use "selection_mode":"required" only when later execution needs exactly one row chosen from multiple candidates. Otherwise use "selection_mode":"none" or omit it.
+- If the user already provides a concrete identifier or name needed to disambiguate a later step, pass it through in tool args or SQL filters instead of planning a follow-up prompt.
+- Placeholder references must point only to earlier steps, e.g. "$s1.id".
+- Placeholder references must be exactly "$sN.field". Do not use array indexing, nested paths, or expressions like "$s1.items[0].id".
+- When authenticated user context is needed, begin with:
+  {json.dumps(GET_USER_ID_STEP)}
+- Do not invent tools that are not listed.
+- Do not use domain-specific shortcuts. Reason only from the request, tool signatures, SQL schema, and prior conversation.
+"""
 
 
 def _ensure_get_user_id_first(steps: list[dict]) -> list[dict]:
-    """Guarantee s0/get_user_id is always the first step."""
     has_bootstrap = any(
         s.get("name") == "get_user_id" or s.get("id") == "s0"
         for s in steps
     )
     if not has_bootstrap:
-        logger.warning("planner: get_user_id step missing, prepending automatically")
         return [GET_USER_ID_STEP] + steps
 
     bootstrap = next(s for s in steps if s.get("name") == "get_user_id" or s.get("id") == "s0")
@@ -252,13 +113,96 @@ def _ensure_get_user_id_first(steps: list[dict]) -> list[dict]:
     return [bootstrap] + rest
 
 
+_COMPARATIVE_TOP1_SQL_RE = re.compile(
+    r"^\s*SELECT\s+.+?\s+FROM\s+(wallets|categories|transactions)\s+.+\bORDER\s+BY\b.+\bLIMIT\s+1\b",
+    re.IGNORECASE,
+)
+
+_TABLE_CANDIDATE_SELECT = {
+    "wallets": "SELECT id, name, balance, currency FROM wallets",
+    "categories": "SELECT id, name, icon, budget_limit, period FROM categories",
+    "transactions": "SELECT id, description, amount, transaction_date, created_at FROM transactions",
+}
+
+
+def _query_references_step(step_id: str, step: dict) -> bool:
+    args = step.get("args") or {}
+    for value in args.values():
+        if isinstance(value, str) and value.startswith(f"${step_id}."):
+            return True
+    return False
+
+
+def _strip_dependency_placeholders(step_id: str, step: dict) -> dict:
+    updated = dict(step)
+    args = dict(updated.get("args") or {})
+    changed = False
+    for key, value in list(args.items()):
+        if isinstance(value, str) and value.startswith(f"${step_id}.") and key.endswith("_id"):
+            args.pop(key, None)
+            changed = True
+    if changed:
+        updated["args"] = args
+    return updated
+
+
+def _extract_from_clause(query_hint: str) -> tuple[str, str] | None:
+    match = re.search(r"\bFROM\s+(wallets|categories|transactions)\b(.*)$", query_hint, re.IGNORECASE)
+    if not match:
+        return None
+    table_name = match.group(1).lower()
+    remainder = match.group(2)
+    remainder = re.sub(r"\bORDER\s+BY\b.+$", "", remainder, flags=re.IGNORECASE).strip()
+    remainder = re.sub(r"\bLIMIT\s+\d+\b", "", remainder, flags=re.IGNORECASE).strip()
+    return table_name, remainder
+
+
+def _rewrite_dependency_lookup_steps(steps: list[dict]) -> list[dict]:
+    rewritten = [dict(step) for step in steps]
+
+    for index, step in enumerate(rewritten):
+        if str(step.get("type") or "").lower() != "sql":
+            continue
+        query_hint = str(step.get("query_hint") or "").strip()
+        step_id = str(step.get("id") or "")
+        if not step_id or not _COMPARATIVE_TOP1_SQL_RE.match(query_hint):
+            continue
+        referenced = False
+        for next_index in range(index + 1, len(rewritten)):
+            next_step = rewritten[next_index]
+            if str(next_step.get("type") or "").lower() != "tool":
+                continue
+            if not _query_references_step(step_id, next_step):
+                continue
+            referenced = True
+            rewritten[next_index] = _strip_dependency_placeholders(step_id, next_step)
+
+        if not referenced:
+            continue
+
+        extracted = _extract_from_clause(query_hint)
+        if extracted is None:
+            continue
+
+        table_name, remainder = extracted
+        query_prefix = _TABLE_CANDIDATE_SELECT.get(table_name)
+        if not query_prefix:
+            continue
+
+        rebuilt_query = query_prefix
+        if remainder:
+            rebuilt_query = f"{rebuilt_query} {remainder}".strip()
+
+        step["query_hint"] = rebuilt_query
+        step["selection_mode"] = "none"
+        step["description"] = str(step.get("description") or "").strip() or (
+            f"Fetch candidate {table_name} rows so the later tool step can resolve the correct id."
+        )
+
+    return rewritten
+
+
 def _validate_execute_steps(steps: list[dict]) -> tuple[list[dict], bool]:
-    """
-    Sanitize and validate execute steps:
-    - Ensure get_user_id is first
-    - Drop steps with missing type/name
-    - Verify every $stepId placeholder references a step that actually exists in the plan
-    """
     if not isinstance(steps, list):
         return [GET_USER_ID_STEP], False
 
@@ -267,209 +211,220 @@ def _validate_execute_steps(steps: list[dict]) -> tuple[list[dict], bool]:
 
     for step in sanitized[1:]:
         step_type = str(step.get("type") or "").strip().lower()
+        reasoning = str(step.get("reasoning") or "").strip()
+        if not reasoning:
+            logger.warning("planner: dropping step without reasoning: %s", step)
+            continue
 
         if step_type == "sql":
-            if step.get("description") or step.get("query_hint"):
-                actionable.append(step)
+            if step.get("query_hint"):
+                actionable.append(dict(step))
             else:
                 logger.warning("planner: dropping empty sql step: %s", step)
-
         elif step_type == "tool":
             if step.get("name"):
-                actionable.append(step)
+                actionable.append(dict(step))
             else:
                 logger.warning("planner: dropping tool step without name: %s", step)
-
         else:
             logger.warning("planner: dropping step with unknown type '%s': %s", step_type, step)
 
     if not actionable:
         return [GET_USER_ID_STEP], False
 
-    all_steps = [sanitized[0]] + actionable
+    all_steps = _rewrite_dependency_lookup_steps([sanitized[0]] + actionable)
     defined_ids = {s.get("id") for s in all_steps}
-
-    # Check every placeholder $sN.field has a matching step id in the plan
     broken: list[str] = []
+
     for step in actionable:
         args = step.get("args") or {}
         for key, value in args.items():
             if not isinstance(value, str):
                 continue
-            for m in _PLACEHOLDER_RE.finditer(value):
-                ref_id = m.group(1)
+            if value.startswith("$"):
+                match = _PLACEHOLDER_RE.match(value.strip())
+                if not match:
+                    broken.append(
+                        f"step '{step.get('id')}' arg '{key}' uses unsupported placeholder syntax '{value}'"
+                    )
+                    continue
+                ref_id = match.group(1)
                 if ref_id not in defined_ids:
                     broken.append(
-                        f"step '{step.get('id')}' arg '{key}' "
-                        f"references undefined step '${ref_id}'"
+                        f"step '{step.get('id')}' arg '{key}' references undefined step '${ref_id}'"
                     )
 
     if broken:
-        logger.error(
-            "planner: broken placeholder references — falling back to clarify:\n  %s",
-            "\n  ".join(broken),
-        )
+        logger.error("planner: broken placeholder references:\n  %s", "\n  ".join(broken))
         return [GET_USER_ID_STEP], False
 
     return all_steps, True
 
 
-def _parse_planner_output(text: str, latest_human_text: str = "") -> dict:
-    try:
-        clean = re.sub(r"```[a-z]*", "", text).strip().strip("`")
-        data = json.loads(clean)
-        route = data.get("route", "clarify")
-        if route not in ("sql_agent", "execute", "finalize", "clarify"):
-            logger.warning("planner: unknown route '%s'", route)
-            return {"route": "clarify", "reason": "unknown route"}
+def _parse_planner_output(text: str) -> dict:
+    clean = re.sub(r"```[a-z]*", "", text).strip().strip("`")
+    data = json.loads(clean)
+    route = data.get("route", "clarify")
+    if route not in ("execute", "finalize", "clarify"):
+        raise ValueError(f"unsupported route: {route}")
 
-        if route == "chat":
-            return _build_advice_execute_plan() if _is_advice_request(latest_human_text) else {
+    if route == "execute":
+        steps, is_valid = _validate_execute_steps(data.get("steps", []))
+        if not is_valid:
+            return {
                 "route": "clarify",
-                "reason": "chat removed from planner",
+                "reason": "invalid execute steps",
+                "message": DEFAULT_CLARIFY_RESPONSE,
             }
+        data["steps"] = steps
 
-        if route == "execute":
-            steps, is_valid = _validate_execute_steps(data.get("steps", []))
-            if not is_valid:
-                return {"route": "clarify", "reason": "invalid execute steps"}
-            data["steps"] = steps
+    if route in ("finalize", "clarify") and not str(data.get("message") or "").strip():
+        data["message"] = DEFAULT_CLARIFY_RESPONSE if route == "clarify" else "Done."
 
-        return data
-    except (json.JSONDecodeError, AttributeError):
-        logger.warning("planner: failed to parse: %s", text[:200])
-        return {"route": "clarify", "reason": "parse error"}
+    return data
 
 
-def _fallback_route(messages: list) -> dict:
-    latest_human = next((m for m in reversed(messages) if isinstance(m, HumanMessage)), None)
-    text = str(latest_human.content if latest_human else "").strip().lower()
-    normalized = " ".join(text.split())
+def _latest_user_text(messages: list) -> str:
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            content = getattr(message, "content", "")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+    return ""
 
-    if not normalized:
-        return {"route": "clarify", "reason": "empty message"}
 
-    query_markers = (
-        "tổng", "bao nhiêu", "thống kê", "báo cáo", "liệt kê",
-        "xem", "còn dư", "số dư", "vừa rồi", "tháng", "tuần",
-        "hôm nay", "hôm qua", "danh mục", "gần nhất", "mới nhất",
-        "cuối cùng", "chi tiêu gần nhất", "giao dịch gần nhất",
-    )
-    create_markers = ("tạo category", "tao category", "tạo danh mục", "tao danh muc")
-    amount_pattern = r"\b\d+(?:[.,]\d+)?\s*(?:k|nghìn|ngàn|triệu|tr|đ|dong|vnd)\b"
+def _extract_wallet_hint(text: str) -> str:
+    match = _WALLET_HINT_RE.search(text)
+    if not match:
+        return ""
+    hint = match.group(1).strip(" .,:;!?")
+    return hint
 
-    if any(m in normalized for m in create_markers):
-        return {
-            "route": "execute",
-            "reason": "fallback: category creation",
-            "steps": [
-                GET_USER_ID_STEP,
+
+def _remove_amount_and_wallet(text: str) -> str:
+    without_wallet = _WALLET_HINT_RE.sub("", text).strip()
+    without_amount = _AMOUNT_TOKEN_RE.sub("", without_wallet, count=1).strip()
+    return re.sub(r"\s+", " ", without_amount).strip(" .,:;!?")
+
+
+def _build_transaction_fallback(messages: list) -> dict | None:
+    tools_schema = describe_tools()
+    if "create_transaction" not in tools_schema:
+        return None
+
+    user_text = _latest_user_text(messages)
+    if not user_text:
+        return None
+
+    amount_match = _AMOUNT_TOKEN_RE.search(user_text)
+    if not amount_match:
+        return None
+
+    amount_token = amount_match.group(0).strip()
+    if not amount_token:
+        return None
+
+    description = _remove_amount_and_wallet(user_text)
+    if not description:
+        return None
+
+    args: dict[str, str] = {
+        "amount": amount_token,
+        "description": description,
+    }
+
+    return {
+        "route": "execute",
+        "reason": "planner clarify fallback for transaction entry",
+        "steps": _ensure_get_user_id_first(
+            [
                 {
-                    "id": "s1", "type": "tool", "name": "create_category",
-                    "args": {"name": re.sub("|".join(create_markers), "", normalized).strip()},
-                },
-            ],
-        }
-
-    if _is_advice_request(normalized):
-        return _build_advice_execute_plan()
-
-    if any(m in normalized for m in query_markers):
-        return {
-            "route": "sql_agent",
-            "reason": "fallback: reporting query",
-        }
-
-    if re.search(amount_pattern, normalized):
-        amount_match = re.search(amount_pattern, normalized)
-        desc = re.sub(amount_pattern, "", normalized).strip()
-        return {
-            "route": "execute",
-            "reason": "fallback: transaction needs wallet lookup",
-            "steps": [
-                GET_USER_ID_STEP,
-                {
-                    "id": "s1", "type": "sql",
-                    "description": "fetch user active wallets",
-                    "query_hint": "SELECT id, name, balance, currency FROM wallets WHERE user_id = :user_id AND active = true",
+                    "id": "s1",
+                    "type": "sql",
+                    "reasoning": "create_transaction requires wallet_id, which is not yet known, so fetch candidate wallets for the authenticated user before writing the transaction.",
+                    "description": "Fetch candidate wallets for the current user so wallet_id can be resolved later.",
+                    "query_hint": "SELECT id, name, balance, currency FROM wallets WHERE user_id = $s0.user_id AND active = true",
+                    "selection_mode": "none",
                 },
                 {
-                    "id": "s2", "type": "tool", "name": "create_transaction",
-                    "args": {
-                        "amount": amount_match.group(0),
-                        "description": desc,
-                        "wallet_id": "$s1.id",
-                    },
-                },
-            ],
-        }
+                    "id": "s2",
+                    "type": "tool",
+                    "name": "create_transaction",
+                    "reasoning": "The request looks like a transaction entry with a concrete amount, so create the transaction after wallet candidates are available for resolution.",
+                    "args": args,
+                }
+            ]
+        ),
+    }
 
-    if normalized in {"ok", "oke", "cảm ơn", "cam on", "hello", "hi"}:
-        return {"route": "finalize", "reason": "fallback: casual chat"}
-
-    return {"route": "clarify", "reason": "fallback: undetermined"}
-
-
-# ---------------------------------------------------------------------------
-# Nodes
-# ---------------------------------------------------------------------------
 
 async def planner_node(state: State) -> dict:
     messages = list(state.get("messages", []))
     history = [
-        m for m in messages
-        if isinstance(m, (HumanMessage, AIMessage))
-        and not getattr(m, "tool_calls", None)
-    ][-6:]
+        message for message in messages
+        if isinstance(message, (HumanMessage, AIMessage))
+        and not getattr(message, "tool_calls", None)
+    ][-8:]
 
     llm = _get_llm()
+    raw = ""
     try:
         response = await llm.ainvoke([SystemMessage(content=_build_planner_system_prompt())] + history)
         raw = response.content if hasattr(response, "content") else str(response)
-        latest_human_text = str(next((m.content for m in reversed(history) if isinstance(m, HumanMessage)), ""))
-        result = _parse_planner_output(raw, latest_human_text)
+        result = _parse_planner_output(raw)
+    except json.JSONDecodeError as exc:
+        logger.warning("planner: JSON parse failed: %s | raw=%s", exc, raw[:200])
+        result = {
+            "route": "clarify",
+            "reason": "planner parse failure",
+            "message": DEFAULT_CLARIFY_RESPONSE,
+        }
+    except ValueError as exc:
+        logger.warning("planner: invalid planner output: %s | raw=%s", exc, raw[:200])
+        result = {
+            "route": "clarify",
+            "reason": "planner validation failure",
+            "message": DEFAULT_CLARIFY_RESPONSE,
+        }
     except Exception as exc:
-        logger.warning("planner: LLM failed, fallback. error=%s", exc)
-        result = _fallback_route(history)
+        logger.error("planner: unexpected failure: %s", exc)
+        result = {
+            "route": "clarify",
+            "reason": "planner failure",
+            "message": DEFAULT_CLARIFY_RESPONSE,
+        }
 
     if result.get("route") == "clarify":
-        latest_human_text = str(next((m.content for m in reversed(history) if isinstance(m, HumanMessage)), ""))
-        if _CREATE_CATEGORY_RE.search(" ".join(latest_human_text.strip().lower().split())):
-            category_name = _extract_category_name_from_history(history)
-            if category_name:
-                result = _build_create_category_execute_plan(category_name)
-
-    if result.get("reason") in {"parse error", "invalid execute steps"}:
-        result = _fallback_route(history)
-
-    logger.info(
-        "planner: route=%s reason=%s steps=%d",
-        result.get("route"), result.get("reason"), len(result.get("steps", [])),
-    )
+        fallback = _build_transaction_fallback(messages)
+        if fallback is not None:
+            logger.info("planner: replacing clarify with transaction execute fallback")
+            result = fallback
 
     update: dict = {"route": result["route"]}
     if result["route"] == "execute":
         update["steps"] = result.get("steps", [])
         update["step_index"] = 0
         update["step_results"] = {}
-
+        update["past_steps"] = list(state.get("past_steps") or [])
+        update["replan_attempts"] = int(state.get("replan_attempts") or 0)
+    else:
+        update["messages"] = [AIMessage(content=str(result.get("message") or DEFAULT_CLARIFY_RESPONSE))]
     return update
 
 
 def route_after_planner(state: State) -> Route:
     route = state.get("route", "clarify")
-    if route not in ("sql_agent", "execute", "finalize", "clarify"):
+    if route not in ("execute", "finalize", "clarify"):
         logger.warning("route_after_planner: unexpected '%s', clarifying", route)
         return "clarify"
     return route
 
 
 async def clarify_node(state: State) -> dict:
-    messages = list(state.get("messages", []))
-    latest_human = next((m for m in reversed(messages) if isinstance(m, HumanMessage)), None)
-    latest_text = str(getattr(latest_human, "content", "")).strip().lower()
-
-    if _CREATE_CATEGORY_RE.search(" ".join(latest_text.split())):
-        return {"messages": [AIMessage(content=_build_category_clarify_response(messages))]}
-
-    return {"messages": [AIMessage(content=_CLARIFY_RESPONSE)]}
+    existing_ai = next(
+        (message for message in reversed(list(state.get("messages") or [])) if isinstance(message, AIMessage)),
+        None,
+    )
+    if existing_ai is not None and str(getattr(existing_ai, "content", "")).strip():
+        return {"messages": [existing_ai]}
+    return {"messages": [AIMessage(content=DEFAULT_CLARIFY_RESPONSE)]}

@@ -21,6 +21,23 @@ def get_current_day() -> str:
     from datetime import datetime
     return datetime.now().strftime("%Y-%m-%d")
 
+# TABLE transactions (
+#     id UUID NOT NULL,
+#     amount NUMERIC(19, 2) NOT NULL,
+#     type VARCHAR(50) NOT NULL,
+#     category_id UUID,
+#     category_name VARCHAR(255),
+#     description VARCHAR(255),
+#     wallet_id UUID,
+#     user_id UUID NOT NULL,
+#     transaction_date TIMESTAMP WITH TIME ZONE NOT NULL,
+#     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+#     updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+#     image_url VARCHAR(1024),
+#     external_transaction_id VARCHAR(255),
+#     PRIMARY KEY (id)
+# )
+
 SQL_AGENT_SYSTEM_PROMPT = f"""You are a SQL assistant for a PostgreSQL database.
 
 Today is {get_current_day()}
@@ -29,21 +46,21 @@ Treat the schema below as the authoritative source for table definitions and typ
 
 If you cannot produce a correct answer or SQL based solely on the provided schema, respond with the exact token NEED_TOOL so the agent can retry using DB-introspection tools.
 
-TABLE transactions (
-    id UUID NOT NULL,
-    amount NUMERIC(19, 2) NOT NULL,
-    type VARCHAR(50) NOT NULL,
-    category_id UUID,
-    category_name VARCHAR(255),
-    description VARCHAR(255),
-    wallet_id UUID,
-    user_id UUID NOT NULL,
-    transaction_date TIMESTAMP WITH TIME ZONE NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
-    updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
-    image_url VARCHAR(1024),
-    external_transaction_id VARCHAR(255),
-    PRIMARY KEY (id)
+MONGODB SCHEMA
+
+COLLECTION transactions (
+    id: STRING,
+    amount: NUMBER,
+    type: STRING,
+    category_id: STRING,
+    category_name: STRING,
+    description: STRING,
+    wallet_id: STRING,
+    user_id: STRING,
+    transaction_date: STRING,
+    created_at: STRING,
+    updated_at: STRING,
+    image_url: STRING,
 )
 TABLE wallets (
         id UUID NOT NULL, 

@@ -7,6 +7,30 @@ import unittest
 from pathlib import Path
 
 from fastapi.security import HTTPAuthorizationCredentials
+
+
+class _FakeAIMessage:
+    def __init__(self, content="", tool_calls=None, **_kwargs):
+        self.content = content
+        self.tool_calls = tool_calls or []
+
+
+class _FakeHumanMessage:
+    def __init__(self, content="", **_kwargs):
+        self.content = content
+
+
+class _FakeCommand:
+    def __init__(self, resume):
+        self.resume = resume
+
+
+sys.modules["langchain_core.messages"] = types.SimpleNamespace(
+    AIMessage=_FakeAIMessage,
+    HumanMessage=_FakeHumanMessage,
+)
+sys.modules["langgraph.types"] = types.SimpleNamespace(Command=_FakeCommand)
+
 from langchain_core.messages import AIMessage
 from langgraph.types import Command
 
@@ -79,7 +103,8 @@ class ChatRouteStreamingTests(unittest.TestCase):
         request = types.SimpleNamespace(
             app=types.SimpleNamespace(
                 state=types.SimpleNamespace(main_graph=fake_graph)
-            )
+            ),
+            headers={"X-Session-Id": "<SESSION_ID>"},
         )
         credentials = HTTPAuthorizationCredentials(
             scheme="Bearer",
@@ -130,7 +155,8 @@ class ChatRouteStreamingTests(unittest.TestCase):
         request = types.SimpleNamespace(
             app=types.SimpleNamespace(
                 state=types.SimpleNamespace(main_graph=fake_graph)
-            )
+            ),
+            headers={},
         )
         credentials = HTTPAuthorizationCredentials(
             scheme="Bearer",
@@ -166,7 +192,8 @@ class ChatRouteStreamingTests(unittest.TestCase):
         request = types.SimpleNamespace(
             app=types.SimpleNamespace(
                 state=types.SimpleNamespace(main_graph=fake_graph)
-            )
+            ),
+            headers={},
         )
         credentials = HTTPAuthorizationCredentials(
             scheme="Bearer",
@@ -190,7 +217,7 @@ class ChatRouteStreamingTests(unittest.TestCase):
         body = asyncio.run(_read_body())
 
         self.assertIsInstance(fake_graph.inputs[0], Command)
-        self.assertEqual(fake_graph.inputs[0].resume, "1")
+        self.assertEqual(fake_graph.inputs[0].resume, {"interrupt-1": "1"})
         self.assertEqual(
             body,
             f"data: {json.dumps({'text': 'Đã ghi nhận chi tiêu.'}, ensure_ascii=False)}\n\n",
