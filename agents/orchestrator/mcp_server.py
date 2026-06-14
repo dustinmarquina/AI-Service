@@ -181,7 +181,13 @@ async def _api_call(
 
 def _error_response(message: str, **extra) -> Dict[str, Any]:
     """Uniform error dict returned to the MCP caller."""
-    return {"status": "error", "message": message, **extra}
+    return {"status": "needs_input", "message": message, **extra}
+
+def _missing_field_response(field_name: str, missing_field: Any = None) -> Dict[str, Any]:
+    """Standardized response for missing required fields."""
+    if isinstance(missing_field, str) and missing_field.strip():
+        return {"status": "needs_input", "input_kind": "text", "message": f"Missing required field: {field_name}", "prompt": f"Please provide a value for {field_name}:", "field": field_name}
+    return {"status": "needs_input", "input_kind": "text" if missing_field is not None else None, "message": f"Missing required field: {field_name}", "prompt": f"Please provide a value for {field_name}:", "field": field_name}
 
 
 def _auth_error_message(status_code: int) -> str:
@@ -384,8 +390,8 @@ async def create_wallet(
 
 @mcp.tool()
 async def create_transaction(
-    amount: str,
-    description: str,
+    amount: str = "",
+    description: str = "",
     wallet_id: str = "",
     wallet_name: str = "",
     request_text: str = "",
@@ -411,9 +417,9 @@ async def create_transaction(
     """
     # --- validation ---
     if not str(amount).strip():
-        return _error_response("Amount is required.")
+        return _missing_field_response(field_name="amount", missing_field=amount)
     if not str(description).strip():
-        return _error_response("Description is required.")
+        return _missing_field_response(field_name="description", missing_field=description)
 
     resolved_user_id = _resolve_user_id(user_id)
     if not resolved_user_id:

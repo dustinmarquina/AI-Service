@@ -213,7 +213,10 @@ def _row_detail(row: dict[str, Any]) -> str:
     return " | ".join(extras)
 
 
-def _build_selection_prompt(rows: list[dict], prompt: str | None = None) -> str:
+def _build_prompt(rows: list[dict], prompt: str | None = None, input_kind: str = "selection", field: str | None = None) -> str:
+    if input_kind == "text":
+        field_name = field or "input"
+        return prompt or f"Please provide the {field_name}:"
     lines = [prompt or "Please choose one option:"]
     for i, row in enumerate(rows, 1):
         label = _row_label(row)
@@ -327,7 +330,7 @@ def _score_row_match(normalized_selection: str, row: dict[str, Any]) -> int:
 def _resolve_row_selection(selection: Any, rows: list[dict]) -> dict | None:
     selection_text = _extract_selection_text(selection)
     if not selection_text:
-        return None
+        return None 
 
     index = _parse_selection_index(selection_text, len(rows))
     if index is not None:
@@ -455,7 +458,7 @@ def _format_result_rows(rows: list[dict[str, Any]], limit: int = 10) -> list[str
 
 
 async def _prompt_for_selection(prompt_intro: str, candidates: list[dict]) -> dict | None:
-    prompt = _build_selection_prompt(candidates, prompt_intro)
+    prompt = _build_prompt(candidates, prompt_intro)
     while True:
         selection = interrupt(prompt)
         if selection == prompt:
@@ -467,11 +470,18 @@ async def _prompt_for_selection(prompt_intro: str, candidates: list[dict]) -> di
         if matched is not None:
             return matched
 
-        prompt = _build_selection_prompt(
+        prompt = _build_prompt(
             candidates,
             f"{prompt_intro}\nInvalid selection. Please choose one of the listed options.",
         )
-
+async def _prompt_for_typing(prompt: str) -> str | None:
+    while True:
+        user_input = interrupt(prompt)
+        if user_input == prompt:
+            return None
+        if isinstance(user_input, str) and user_input.strip():
+            return user_input.strip()
+        prompt = f"{prompt}\nInput cannot be empty. Please provide a valid input."
 
 # ---------------------------------------------------------------------------
 # Executor node
@@ -642,7 +652,7 @@ async def executor_node(state: State) -> dict:
                 "past_steps": past_steps,
             }
 
-        prompt = _build_selection_prompt(rows, current.get("selection_prompt"))
+        prompt = _build_prompt(rows, current.get("selection_prompt"))
         step_results[f"{step_id}__pending_input"] = {
             "prompt_intro": current.get("selection_prompt") or "Please choose one option:",
             "prompt": prompt,
@@ -686,42 +696,66 @@ async def executor_node(state: State) -> dict:
         pending_input = step_results.get(f"{step_id}__pending_input")
 
         if pending_input:
-            candidates = list(pending_input.get("candidates") or [])
-            prompt_intro = _selection_prompt_intro(
-                pending_input,
-                "Please choose one option:",
-            )
-            selection_field = str(pending_input.get("selection_field") or "").strip()
-            value_field = str(pending_input.get("value_field") or "").strip() or None
-            matched = await _prompt_for_selection(prompt_intro, candidates)
-            if matched is None:
-                return {
-                    "step_index": step_index,
-                    "step_results": step_results,
-                    "past_steps": past_steps,
-                }
-
-            selected_value = _selection_value(matched, value_field, selection_field)
-            if selection_field and selected_value not in (None, ""):
-                resolved_args = dict(pending_input.get("args") or {})
-                resolved_args[selection_field] = selected_value
-            else:
-                past_steps = _append_past_step(
-                    past_steps,
-                    step_id=step_id,
-                    step_type="tool",
-                    step_input=pending_input.get("args", {}),
-                    output=matched,
-                    status="error",
-                    summary="Selected option did not provide a usable value",
-                    reasoning=step_reasoning,
+            input_kind = str(pending_input.get("input_kind", "selection")).strip().lower()
+            if input_kind == "selection":
+                candidates = list(pending_input.get("candidates") or [])
+                prompt_intro = _selection_prompt_intro(
+                    pending_input,
+                    "Please choose one option:",
                 )
-                return {
-                    "messages": [AIMessage(content="The selected option could not be used.")],
-                    "step_index": len(steps),
-                    "step_results": step_results,
-                    "past_steps": past_steps,
-                }
+                selection_field = str(pending_input.get("selection_field") or "").strip()
+                value_field = str(pending_input.get("value_field") or "").strip() or None
+                matched = await _prompt_for_selection(prompt_intro, candidates)
+                if matched is None: 
+                    return {
+                        "step_index": step_index,
+                        "step_results": step_results,
+                        "past_steps": past_steps,
+                    }
+
+                selected_value = _selection_value(matched, value_field, selection_field)
+                if selection_field and selected_value not in (None, ""):
+                    resolved_args = dict(pending_input.get("args") or {})
+                    resolved_args[selection_field] = selected_value
+                else:
+                    past_steps = _append_past_step(
+                        past_steps,
+                        step_id=step_id,
+                        step_type="tool",
+                        step_input=pending_input.get("args", {}),
+                        output=matched,
+                        status="error",
+                        summary="Selected option did not provide a usable value",
+                        reasoning=step_reasoning,
+                    )
+                    return {
+                        "messages": [AIMessage(content="The selected option could not be used.")],
+                        "step_index": len(steps),
+                        "step_results": step_results,
+                        "past_steps": past_steps,
+                    }
+            if input_kind == "text":
+                field = str(pending_input.get("field") or "").strip()
+                if field:
+                    resolved_args = dict(pending_input.get("args") or {})
+                    resolved_args[field] = selected_value
+                else:
+                    past_steps = _append_past_step(
+                        past_steps,
+                        step_id=step_id,
+                        step_type="tool",
+                        step_input=pending_input.get("args", {}),
+                        output=matched,
+                        status="error",
+                        summary="Tool requested text input without specifying the field",
+                        reasoning=step_reasoning,
+                    )
+                    return {
+                        "messages": [AIMessage(content="The tool requested input in an invalid format.")],
+                        "step_index": len(steps),
+                        "step_results": step_results,
+                        "past_steps": past_steps,
+                    }
             step_results.pop(f"{step_id}__pending_input", None)
         else:
             try:
@@ -759,68 +793,108 @@ async def executor_node(state: State) -> dict:
         from .tool_registry import call_mcp_tool
         tool_result = await call_mcp_tool(tool_name, resolved_args)
         if isinstance(tool_result, dict) and tool_result.get("status") == "needs_input":
-            candidates = list(tool_result.get("candidates") or [])
-            selection_field = str(tool_result.get("selection_field") or "").strip()
-            prompt_intro = str(tool_result.get("prompt") or "Please choose one option:")
-            prompt = _build_selection_prompt(candidates, prompt_intro)
-            if not candidates or not selection_field:
-                past_steps = _append_past_step(
-                    past_steps,
-                    step_id=step_id,
-                    step_type="tool",
-                    step_input=resolved_args,
-                    output=tool_result,
-                    status="error",
-                    summary="Tool requested input without a valid selection contract",
-                    reasoning=step_reasoning,
-                )
-                return {
-                    "messages": [AIMessage(content="The tool requested input in an invalid format.")],
-                    "step_index": len(steps),
-                    "step_results": step_results,
-                    "past_steps": past_steps,
-                }
+            input_kind = str(tool_result.get("input_kind", "selection")).strip().lower()
+            if input_kind == "selection":
+                candidates = list(tool_result.get("candidates") or [])
+                selection_field = str(tool_result.get("selection_field") or "").strip()
+                prompt_intro = str(tool_result.get("prompt") or "Please choose one option:")
+                prompt = _build_prompt(candidates, prompt_intro)
+                if not candidates or not selection_field:
+                    past_steps = _append_past_step(
+                        past_steps,
+                        step_id=step_id,
+                        step_type="tool",
+                        step_input=resolved_args,
+                        output=tool_result,
+                        status="error",
+                        summary="Tool requested input without a valid selection contract",
+                        reasoning=step_reasoning,
+                    )
+                    return {
+                        "messages": [AIMessage(content="The tool requested input in an invalid format.")],
+                        "step_index": len(steps),
+                        "step_results": step_results,
+                        "past_steps": past_steps,
+                    }
 
-            step_results[f"{step_id}__pending_input"] = {
-                "prompt_intro": prompt_intro,
-                "prompt": prompt,
-                "candidates": candidates,
-                "selection_field": selection_field,
-                "value_field": tool_result.get("value_field"),
-                "args": resolved_args,
-            }
-            matched = await _prompt_for_selection(prompt_intro, candidates)
-            if matched is None:
-                return {
-                    "step_index": step_index,
-                    "step_results": step_results,
-                    "past_steps": past_steps,
+                step_results[f"{step_id}__pending_input"] = {
+                    "prompt_intro": prompt_intro,
+                    "prompt": prompt,
+                    "candidates": candidates,
+                    "selection_field": selection_field,
+                    "value_field": tool_result.get("value_field"),
+                    "args": resolved_args,
                 }
-            selected_value = _selection_value(
-                matched,
-                str(tool_result.get("value_field") or "").strip() or None,
-                selection_field,
-            )
-            if selected_value in (None, ""):
-                past_steps = _append_past_step(
-                    past_steps,
-                    step_id=step_id,
-                    step_type="tool",
-                    step_input=resolved_args,
-                    output=matched,
-                    status="error",
-                    summary="Selected option did not provide a usable value",
-                    reasoning=step_reasoning,
+                matched = await _prompt_for_selection(prompt_intro, candidates)
+                if matched is None:
+                    return {
+                        "step_index": step_index,
+                        "step_results": step_results,
+                        "past_steps": past_steps,
+                    }
+                selected_value = _selection_value(
+                    matched,
+                    str(tool_result.get("value_field") or "").strip() or None,
+                    selection_field,
                 )
-                return {
-                    "messages": [AIMessage(content="The selected option could not be used.")],
-                    "step_index": len(steps),
-                    "step_results": step_results,
-                    "past_steps": past_steps,
+                if selected_value in (None, ""):
+                    past_steps = _append_past_step(
+                        past_steps,
+                        step_id=step_id,
+                        step_type="tool",
+                        step_input=resolved_args,
+                        output=matched,
+                        status="error",
+                        summary="Selected option did not provide a usable value",
+                        reasoning=step_reasoning,
+                    )
+                    return {
+                        "messages": [AIMessage(content="The selected option could not be used.")],
+                        "step_index": len(steps),
+                        "step_results": step_results,
+                        "past_steps": past_steps,
+                    }
+                resolved_args = dict(resolved_args)
+                resolved_args[selection_field] = selected_value
+            elif input_kind == "text":
+                field = str(tool_result.get("field") or "").strip()
+                prompt_intro = str(tool_result.get("prompt") or "Please provide the missing input:")
+                if not field:
+                    past_steps = _append_past_step(
+                        past_steps,
+                        step_id=step_id,
+                        step_type="tool",
+                        step_input=resolved_args,
+                        output=tool_result,
+                        status="error",
+                        summary="Tool requested text input without specifying the field",
+                        reasoning=step_reasoning,
+                    )
+                    return {
+                        "messages": [AIMessage(content="The tool requested input in an invalid format.")],
+                        "step_index": len(steps),
+                        "step_results": step_results,
+                        "past_steps": past_steps,
+                    }
+                step_results[f"{step_id}__pending_input"] = {
+                    "input_kind": "text",
+                    "field": field,
+                    "prompt_intro": prompt_intro,
+                    "prompt": prompt_intro,
+                    "args": resolved_args,
                 }
-
-            resolved_args = dict(resolved_args)
-            resolved_args[selection_field] = selected_value
+                user_input = await _prompt_for_typing(prompt_intro)
+                if user_input is None:
+                    return {
+                        "step_index": step_index,
+                        "step_results": step_results,
+                        "past_steps": past_steps,
+                    }
+                selected_value = user_input.strip()
+                resolved_args = dict(resolved_args)
+                resolved_args[field] = selected_value
+            
+            
             step_results.pop(f"{step_id}__pending_input", None)
             logger.info("executor: calling tool '%s' args=%s", tool_name, {
                 k: (v[:8] + "...") if k == "token" and isinstance(v, str) else v
@@ -828,22 +902,37 @@ async def executor_node(state: State) -> dict:
             })
             tool_result = await call_mcp_tool(tool_name, resolved_args)
             if isinstance(tool_result, dict) and tool_result.get("status") == "needs_input":
-                step_results[f"{step_id}__pending_input"] = {
-                    "prompt_intro": str(tool_result.get("prompt") or prompt_intro),
-                    "prompt": _build_selection_prompt(
-                        list(tool_result.get("candidates") or []),
-                        str(tool_result.get("prompt") or prompt_intro),
-                    ),
-                    "candidates": list(tool_result.get("candidates") or []),
-                    "selection_field": str(tool_result.get("selection_field") or selection_field).strip(),
-                    "value_field": tool_result.get("value_field"),
-                    "args": resolved_args,
-                }
-                return {
-                    "step_index": step_index,
-                    "step_results": step_results,
-                    "past_steps": past_steps,
-                }
+                input_kind = str(tool_result.get("input_kind", "selection")).strip().lower()
+                if input_kind == "selection":
+                    step_results[f"{step_id}__pending_input"] = {
+                        "prompt_intro": str(tool_result.get("prompt") or prompt_intro),
+                        "prompt": _build_prompt(
+                            list(tool_result.get("candidates") or []),
+                            str(tool_result.get("prompt") or prompt_intro),
+                        ),
+                        "candidates": list(tool_result.get("candidates") or []),
+                        "selection_field": str(tool_result.get("selection_field") or selection_field).strip(),
+                        "value_field": tool_result.get("value_field"),
+                        "args": resolved_args,
+                    }
+                    return {
+                        "step_index": step_index,
+                        "step_results": step_results,
+                        "past_steps": past_steps,
+                    }
+                if input_kind == "text":
+                    step_results[f"{step_id}__pending_input"] = {
+                        "input_kind": "text",
+                        "field": str(tool_result.get("field") or field).strip(),
+                        "prompt_intro": str(tool_result.get("prompt") or prompt_intro),
+                        "prompt": str(tool_result.get("prompt") or prompt_intro),
+                        "args": resolved_args,
+                    }
+                    return {
+                        "step_index": step_index,
+                        "step_results": step_results,
+                        "past_steps": past_steps,
+                    }
 
             step_results[step_id] = tool_result
             past_steps = _append_past_step(

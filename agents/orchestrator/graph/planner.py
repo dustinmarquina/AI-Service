@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import unicodedata
 from typing import Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -48,6 +49,20 @@ _AMOUNT_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 _WALLET_HINT_RE = re.compile(r"\b(?:v[aà]o\s+v[ií]|v[ií])\s+(.+)$", re.IGNORECASE)
+_GENERIC_TRANSACTION_DESCRIPTIONS = {
+    "giao dich",
+    "them giao dich",
+    "tao giao dich",
+    "them mot giao dich",
+    "chi tieu",
+    "them chi tieu",
+    "tao chi tieu",
+    "expense",
+    "add expense",
+    "transaction",
+    "add transaction",
+    "create transaction",
+}
 _llm = None
 
 
@@ -80,9 +95,9 @@ Return ONLY valid JSON with one of these shapes:
 Planning rules:
 - Use "execute" when the request needs one or more tool or sql steps.
 - Use "finalize" only when you can answer directly without executing any step.
-- Use "clarify" when key information is missing or the request is ambiguous.
-- Do not use "clarify" just because an optional tool argument is missing.
-- If a tool's required fields can be satisfied, prefer "execute" and omit optional fields that can be resolved later by SQL lookup, tool-side matching, or execution-time user choice.
+- Use "clarify" when the request has nothing to do with given tools or SQL schema, otherwise attempt to execute steps but the requirements are too ambiguous or complex to resolve with a single SQL lookup or tool call.
+- Do not use "clarify" when the user explicitly commands an action that matches a tool's purpose, even there's missing fields.
+- Do not generate a generic value for the missing fields, just ignore them and let the executor handle it, which may result in a clarifying question later, but that's fine.
 - If ambiguity can be deferred to a later selection step or a tool can request follow-up input during execution, prefer "execute" over "clarify".
 - SQL steps must be SELECT-only and use fields:
   {{"id":"sN","type":"sql","reasoning":"...","description":"...","query_hint":"SELECT ...","selection_mode":"none|required"}}
@@ -301,10 +316,25 @@ def _extract_wallet_hint(text: str) -> str:
     return hint
 
 
+def _normalize_intent_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", str(text or ""))
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    normalized = normalized.lower().strip()
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
 def _remove_amount_and_wallet(text: str) -> str:
     without_wallet = _WALLET_HINT_RE.sub("", text).strip()
     without_amount = _AMOUNT_TOKEN_RE.sub("", without_wallet, count=1).strip()
     return re.sub(r"\s+", " ", without_amount).strip(" .,:;!?")
+
+
+def _is_generic_transaction_description(text: str) -> bool:
+    normalized = _normalize_intent_text(text)
+    if not normalized:
+        return True
+    return normalized in _GENERIC_TRANSACTION_DESCRIPTIONS
 
 
 def _build_transaction_fallback(messages: list) -> dict | None:

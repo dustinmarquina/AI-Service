@@ -174,6 +174,21 @@ class PlannerTests(unittest.TestCase):
         self.assertNotIn("wallet_name", result["steps"][2]["args"])
         self.assertEqual(result["steps"][2]["args"]["description"], "cà ri Ấn Độ")
 
+    def test_generic_transaction_command_is_not_used_as_description(self):
+        original_describe_tools = PLANNER_MODULE.describe_tools
+        try:
+            PLANNER_MODULE.describe_tools = lambda: "- TOOL create_transaction(amount: str [required], description: str [required], wallet_name: str [optional])"
+            PLANNER_MODULE._get_llm = lambda: _StaticLLM(
+                '{"route":"clarify","reason":"need description","message":"Bạn muốn thêm giao dịch gì?"}'
+            )
+
+            result = asyncio.run(planner_node({"messages": [HumanMessage(content="thêm giao dịch 51k")]}))
+        finally:
+            PLANNER_MODULE.describe_tools = original_describe_tools
+
+        self.assertEqual(result["route"], "clarify")
+        self.assertNotIn("steps", result)
+
     def test_dependency_lookup_with_order_by_limit_is_rewritten_to_candidate_query(self):
         PLANNER_MODULE._get_llm = lambda: _StaticLLM(
             '{"route":"execute","reason":"need wallet first","steps":[{"id":"s1","type":"sql","reasoning":"Select the wallet with the lowest balance for this user so the transaction can be recorded there.","query_hint":"SELECT id FROM wallets WHERE user_id = $s0.user_id ORDER BY balance ASC LIMIT 1","selection_mode":"required"},{"id":"s2","type":"tool","name":"create_transaction","reasoning":"Create the expense transaction in the chosen wallet.","args":{"amount":"50k","description":"nem chua Hà Nội","wallet_id":"$s1.id"}}]}'
